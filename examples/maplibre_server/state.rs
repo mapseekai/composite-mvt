@@ -6,6 +6,10 @@ use composite_mvt::{Compression, MvtComposer, MvtSource};
 use futures_util::future::try_join_all;
 use tokio::sync::RwLock;
 
+#[cfg(test)]
+#[path = "state_tests.rs"]
+mod tests;
+
 pub(crate) const DEFAULT_PORT: u16 = 3010;
 
 struct SourceConfig {
@@ -19,7 +23,7 @@ struct ConfiguredSources {
 }
 
 pub(crate) struct AppState {
-    configured: RwLock<Option<ConfiguredSources>>,
+    configured: RwLock<Option<Arc<ConfiguredSources>>>,
     client: reqwest::Client,
 }
 
@@ -105,13 +109,17 @@ impl AppState {
             sources,
             composer: builder.build().map_err(|error| error.to_string())?,
         };
-        *self.configured.write().await = Some(configured);
+        *self.configured.write().await = Some(Arc::new(configured));
         Ok(())
     }
 
     pub(crate) async fn compose_tile(&self, z: &str, x: &str, y: &str) -> Result<Vec<u8>, String> {
-        let configured = self.configured.read().await;
-        let configured = configured.as_ref().ok_or("configure sources first")?;
+        let configured = self
+            .configured
+            .read()
+            .await
+            .clone()
+            .ok_or("configure sources first")?;
         let requests = configured.sources.iter().map(|source| {
             let url = source
                 .url

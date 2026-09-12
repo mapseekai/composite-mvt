@@ -85,12 +85,17 @@ fn decompress_zstd(_: &[u8]) -> Result<Vec<u8>, SourceError> {
 
 #[cfg(feature = "brotli")]
 fn decompress_brotli(input: &[u8]) -> Result<Vec<u8>, SourceError> {
-    use std::io::Read as _;
+    use std::io::Write as _;
 
     let mut output = Vec::new();
-    brotli::Decompressor::new(input, 4096)
-        .read_to_end(&mut output)
-        .map_err(|error| decode_failure(Compression::Brotli, error))?;
+    {
+        let mut decoder = brotli::DecompressorWriter::new(&mut output, 4096);
+        // write_all rejects unconsumed trailing bytes; close rejects incomplete streams.
+        decoder
+            .write_all(input)
+            .and_then(|()| decoder.close())
+            .map_err(|error| decode_failure(Compression::Brotli, error))?;
+    }
     Ok(output)
 }
 

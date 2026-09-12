@@ -1,0 +1,79 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    name: Publish crate and create GitHub release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v6
+
+      - name: Install Rust 1.87
+        run: rustup toolchain install 1.87.0 --profile minimal
+
+      - name: Verify the tag matches the package version
+        shell: bash
+        run: |
+          metadata="$(cargo +1.87.0 metadata --no-deps --format-version=1)"
+          crate_name="$(jq -r '.packages[0].name' <<<"$metadata")"
+          package_version="$(jq -r '.packages[0].version' <<<"$metadata")"
+
+          test -n "$crate_name"
+          test -n "$package_version"
+          test "$GITHUB_REF_NAME" = "v$package_version"
+
+          {
+            echo "CRATE_NAME=$crate_name"
+            echo "PACKAGE_VERSION=$package_version"
+          } >> "$GITHUB_ENV"
+
+      - name: Test all targets and features
+        run: cargo +1.87.0 test --all-targets --all-features --locked
+
+      - name: Verify the publishable package
+        run: cargo +1.87.0 publish --dry-run --locked --registry crates-io
+
+      - name: Authenticate to crates.io with OIDC
+        id: crates_io_auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates_io_auth.outputs.token }}
+        shell: bash
+        run: |
+          response_code="$(curl --retry 3 --silent --show-error --output /dev/null \
+            --write-out "%{http_code}" \
+            "https://crates.io/api/v1/crates/${CRATE_NAME}/${PACKAGE_VERSION}")"
+
+          case "$response_code" in
+            200)
+              echo "${CRATE_NAME} ${PACKAGE_VERSION} is already published; skipping upload."
+              ;;
+            404)
+              cargo +1.87.0 publish --locked --registry crates-io
+              ;;
+            *)
+              echo "Unable to determine whether ${CRATE_NAME} ${PACKAGE_VERSION} exists on crates.io (HTTP ${response_code})." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "GitHub release ${GITHUB_REF_NAME} already exists; skipping creation."
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+          fi
