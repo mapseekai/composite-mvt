@@ -50,22 +50,22 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates_io_auth.outputs.token }}
         shell: bash
         run: |
-          response_code="$(curl --retry 3 --silent --show-error --output /dev/null \
-            --write-out "%{http_code}" \
-            "https://crates.io/api/v1/crates/${CRATE_NAME}/${PACKAGE_VERSION}")"
+          published="$(
+            curl --fail --retry 3 --silent --show-error https://index.crates.io/co/mp/composite-mvt |
+              jq --slurp --arg name "$CRATE_NAME" --arg version "$PACKAGE_VERSION" '
+                if length == 0 or any(.[]; .name != $name or (.vers | type) != "string") then
+                  error("invalid crates.io sparse index")
+                else
+                  any(.[]; .vers == $version)
+                end
+              '
+          )"
 
-          case "$response_code" in
-            200)
-              echo "${CRATE_NAME} ${PACKAGE_VERSION} is already published; skipping upload."
-              ;;
-            404)
-              cargo +1.87.0 publish --locked --registry crates-io
-              ;;
-            *)
-              echo "Unable to determine whether ${CRATE_NAME} ${PACKAGE_VERSION} exists on crates.io (HTTP ${response_code})." >&2
-              exit 1
-              ;;
-          esac
+          if [[ "$published" == true ]]; then
+            echo "${CRATE_NAME} ${PACKAGE_VERSION} is already published; skipping upload."
+          else
+            cargo +1.87.0 publish --locked --registry crates-io
+          fi
 
       - name: Create the GitHub release
         env:
