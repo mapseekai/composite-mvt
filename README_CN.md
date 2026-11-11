@@ -89,7 +89,7 @@ layers=roads,pipeline,valve,building
 
 浏览器示例是单个纯 HTML 页面。可以添加任意数量的矢量瓦片 URL 模板、源图层名、输入压缩格式、渲染类型和颜色。Rust 后端保存这些源配置，获取对应瓦片，使用 `MvtComposer` 合成后返回一个 MVT。
 
-运行示例：
+请在 Git 仓库的检出目录中运行此示例，浏览器资源和离线瓦片随仓库提供：
 
 ```text
 cargo run --example maplibre_server --features gzip

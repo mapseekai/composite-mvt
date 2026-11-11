@@ -115,7 +115,8 @@ The browser example is one plain HTML page. It lets you add any number of vector
 the source-layer names, input compression, render type, and color. The Rust backend saves that source
 configuration, fetches the matching tiles, combines them with `MvtComposer`, and returns one MVT.
 
-Run the example:
+Run the example from a checkout of the Git repository, which contains the browser assets and
+offline tiles:
 
 ```text
 cargo run --example maplibre_server --features gzip

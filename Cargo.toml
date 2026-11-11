@@ -13,12 +13,12 @@ include = [
     "Cargo.toml",
     "LICENSE-APACHE",
     "LICENSE-MIT",
-    "README.md",
+    "/README.md",
     "README_CN.md",
     "CHANGELOG.md",
     "src/**",
     "tests/**",
-    "examples/**",
+    "examples/mixed_sources.rs",
 ]
 
 [dependencies]
