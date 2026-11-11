@@ -1,6 +1,6 @@
 [package]
 name = "composite-mvt"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.87"
 description = "Compose fixed Mapbox Vector Tile sources with optional input and output compression"
@@ -24,14 +24,14 @@ include = [
 [dependencies]
 bytes = "1"
 thiserror = "2"
-fast-mvt = { version = "=0.6.0", default-features = false, features = ["reader"] }
+fast-mvt = { version = "=0.7.2", default-features = false, features = ["reader"] }
 flate2 = { version = "1.1.9", optional = true }
 zstd = { version = "0.13.3", optional = true }
 brotli = { version = "8.0.4", optional = true }
 
 [dev-dependencies]
 axum = "0.8"
-fast-mvt = { version = "=0.6.0", default-features = false, features = ["reader", "writer"] }
+fast-mvt = { version = "=0.7.2", default-features = false, features = ["reader", "writer"] }
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }

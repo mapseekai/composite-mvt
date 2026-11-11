@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-11-11
+
+### Changed
+
+- Update `fast-mvt` to `0.7.2` while retaining Rust 1.87 compatibility.
+
+### Fixed
+
+- Keep the MapLibre demo and its offline tiles in the Git repository so the crates.io archive fits
+  the registry upload limit.
+
 ## [0.2.0] - 2026-09-12
 
 ### Fixed

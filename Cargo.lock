@@ -131,9 +131,9 @@ dependencies = [
 
 [[package]]
 name = "buffa"
-version = "0.9.0"
+version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b97ce1f34252b8e2516042e1002d56c160908a7ff8a1c9d47e97836558d1c83a"
+checksum = "a92f2f5df67a9d5ccfc65237bfc954c56328aee40a04a9b92381ecba370be246"
 dependencies = [
  "bytes",
  "foldhash 0.1.5",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "composite-mvt"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "brotli",
@@ -239,15 +239,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dup-indexer"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d37ded393bfb74c6fb8643715ec650b7e88056fe69525483736a2961c943a98"
-dependencies = [
- "foldhash 0.2.0",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -255,12 +246,12 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "fast-mvt"
-version = "0.6.0"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60c712798f6b01a17144ffb7a5a49a1feb08ee4de6a0669e5f97eac8a38bf3bf"
+checksum = "0eaa38ab3b2ce2d1ee9db239edafd1457e3966fbb7469307db8e812845f034cd"
 dependencies = [
  "buffa",
- "dup-indexer",
+ "foldhash 0.2.0",
  "geo-types",
  "thiserror",
  "usize_cast",
