@@ -7,11 +7,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-22
+
 ### Added
 
 - Set an optional aggregate limit on decoded request inputs with `max_decoded_bytes`.
 - Supply each request input's encoding with `compose_with_encodings`.
 - Resolve duplicate layer names per tile with `DuplicateLayer::KeepFirst` and `KeepLast`.
+
+### Upgrade notes
+
+- Update exhaustive matches on `DuplicateLayer` for `KeepFirst` and `KeepLast`, and on
+  `ComposeError` for `SourceParsing`.
+- Omit `Content-Encoding` when every input is a zero-byte slice. The result is empty for all
+  output encodings.
 
 ### Fixed
 
