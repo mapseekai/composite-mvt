@@ -33,16 +33,51 @@ pub(crate) fn decompress(
     compression: Compression,
     input: &[u8],
 ) -> Result<Cow<'_, [u8]>, SourceError> {
-    match compression {
-        Compression::None => Ok(Cow::Borrowed(input)),
-        Compression::Gzip => decompress_gzip(input).map(Cow::Owned),
-        Compression::Zstd => decompress_zstd(input).map(Cow::Owned),
-        Compression::Brotli => decompress_brotli(input).map(Cow::Owned),
-        Compression::Other => Err(SourceError::UnsupportedCompression { compression }),
+    decompress_limited(compression, input, usize::MAX).map_err(|error| match error {
+        DecodeError::Source(source) => source,
+        DecodeError::SizeLimit => decode_failure(
+            compression,
+            std::io::Error::other("decoded MVT size overflow"),
+        ),
+    })
+}
+
+pub(crate) enum DecodeError {
+    Source(SourceError),
+    SizeLimit,
+}
+
+impl From<SourceError> for DecodeError {
+    fn from(source: SourceError) -> Self {
+        Self::Source(source)
     }
 }
 
-#[cfg(any(feature = "gzip", feature = "zstd", feature = "brotli"))]
+#[inline]
+pub(crate) fn decompress_limited(
+    compression: Compression,
+    input: &[u8],
+    max: usize,
+) -> Result<Cow<'_, [u8]>, DecodeError> {
+    if input.is_empty() {
+        return Ok(Cow::Borrowed(input));
+    }
+
+    let output = match compression {
+        Compression::None => Cow::Borrowed(input),
+        Compression::Gzip => Cow::Owned(decompress_gzip(input, max)?),
+        Compression::Zstd => Cow::Owned(decompress_zstd(input, max)?),
+        Compression::Brotli => Cow::Owned(decompress_brotli(input, max)?),
+        Compression::Other => {
+            return Err(SourceError::UnsupportedCompression { compression }.into());
+        }
+    };
+    if output.len() > max {
+        return Err(DecodeError::SizeLimit);
+    }
+    Ok(output)
+}
+
 fn decode_failure(
     compression: Compression,
     source: impl std::error::Error + Send + Sync + 'static,
@@ -53,57 +88,100 @@ fn decode_failure(
     }
 }
 
-#[cfg(feature = "gzip")]
-fn decompress_gzip(input: &[u8]) -> Result<Vec<u8>, SourceError> {
+#[cfg(any(feature = "gzip", feature = "zstd"))]
+fn read_decoded(
+    reader: impl std::io::Read,
+    max: usize,
+    compression: Compression,
+) -> Result<Vec<u8>, SourceError> {
     use std::io::Read as _;
 
     let mut output = Vec::new();
-    flate2::read::MultiGzDecoder::new(input)
+    // One more byte distinguishes an over-limit stream from a complete exact-size stream.
+    reader
+        .take((max as u64).saturating_add(1))
         .read_to_end(&mut output)
-        .map_err(|error| decode_failure(Compression::Gzip, error))?;
+        .map_err(|error| decode_failure(compression, error))?;
     Ok(output)
 }
 
+#[cfg(feature = "gzip")]
+fn decompress_gzip(input: &[u8], max: usize) -> Result<Vec<u8>, SourceError> {
+    read_decoded(
+        flate2::bufread::MultiGzDecoder::new(input),
+        max,
+        Compression::Gzip,
+    )
+}
+
 #[cfg(not(feature = "gzip"))]
-fn decompress_gzip(_: &[u8]) -> Result<Vec<u8>, SourceError> {
+fn decompress_gzip(_: &[u8], _: usize) -> Result<Vec<u8>, SourceError> {
     Err(SourceError::CompressionFeatureDisabled {
         compression: Compression::Gzip,
     })
 }
 
 #[cfg(feature = "zstd")]
-fn decompress_zstd(input: &[u8]) -> Result<Vec<u8>, SourceError> {
-    zstd::stream::decode_all(input).map_err(|error| decode_failure(Compression::Zstd, error))
+fn decompress_zstd(input: &[u8], max: usize) -> Result<Vec<u8>, SourceError> {
+    let decoder = zstd::stream::Decoder::with_buffer(input)
+        .map_err(|error| decode_failure(Compression::Zstd, error))?;
+    read_decoded(decoder, max, Compression::Zstd)
 }
 
 #[cfg(not(feature = "zstd"))]
-fn decompress_zstd(_: &[u8]) -> Result<Vec<u8>, SourceError> {
+fn decompress_zstd(_: &[u8], _: usize) -> Result<Vec<u8>, SourceError> {
     Err(SourceError::CompressionFeatureDisabled {
         compression: Compression::Zstd,
     })
 }
 
 #[cfg(feature = "brotli")]
-fn decompress_brotli(input: &[u8]) -> Result<Vec<u8>, SourceError> {
-    use std::io::Write as _;
+struct LimitedOutput {
+    bytes: Vec<u8>,
+    max: usize,
+}
 
-    let mut output = Vec::new();
-    {
+#[cfg(feature = "brotli")]
+impl std::io::Write for LimitedOutput {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.max - self.bytes.len() {
+            return Err(std::io::ErrorKind::FileTooLarge.into());
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "brotli")]
+fn decompress_brotli(input: &[u8], max: usize) -> Result<Vec<u8>, DecodeError> {
+    use std::io::{ErrorKind, Write as _};
+
+    let mut output = LimitedOutput {
+        bytes: Vec::new(),
+        max,
+    };
+    let result = {
         let mut decoder = brotli::DecompressorWriter::new(&mut output, 4096);
         // write_all rejects unconsumed trailing bytes; close rejects incomplete streams.
-        decoder
-            .write_all(input)
-            .and_then(|()| decoder.close())
-            .map_err(|error| decode_failure(Compression::Brotli, error))?;
+        decoder.write_all(input).and_then(|()| decoder.close())
+    };
+    match result {
+        Ok(()) => Ok(output.bytes),
+        Err(error) if error.kind() == ErrorKind::FileTooLarge => Err(DecodeError::SizeLimit),
+        Err(error) => Err(decode_failure(Compression::Brotli, error).into()),
     }
-    Ok(output)
 }
 
 #[cfg(not(feature = "brotli"))]
-fn decompress_brotli(_: &[u8]) -> Result<Vec<u8>, SourceError> {
+fn decompress_brotli(_: &[u8], _: usize) -> Result<Vec<u8>, DecodeError> {
     Err(SourceError::CompressionFeatureDisabled {
         compression: Compression::Brotli,
-    })
+    }
+    .into())
 }
 
 pub(crate) fn compress(compression: Compression, input: &[u8]) -> Result<Bytes, BoxError> {
@@ -173,6 +251,29 @@ mod tests {
     #[cfg(any(not(feature = "gzip"), not(feature = "zstd"), not(feature = "brotli")))]
     use crate::error::BoxError;
     use crate::{Compression, SourceError};
+
+    #[cfg(any(feature = "gzip", feature = "zstd"))]
+    #[test]
+    fn bounded_reader_leaves_bytes_after_the_probe_unread() {
+        let mut reader = b"tiles".as_slice();
+        read_decoded(&mut reader, 2, Compression::None).unwrap();
+        assert_eq!(reader, b"es");
+    }
+
+    #[cfg(feature = "brotli")]
+    #[test]
+    fn brotli_writer_stops_at_the_remaining_budget() {
+        use std::io::{ErrorKind, Write as _};
+
+        let mut output = LimitedOutput {
+            bytes: Vec::new(),
+            max: 4,
+        };
+        output.write_all(b"ab").unwrap();
+        let error = output.write_all(b"cde").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::FileTooLarge);
+        assert!(output.bytes.len() <= output.max);
+    }
 
     #[test]
     fn detects_known_frame_signatures() {

@@ -18,10 +18,12 @@ include = [
     "CHANGELOG.md",
     "src/**",
     "tests/**",
+    "benches/compose_raw.rs",
     "examples/mixed_sources.rs",
 ]
 
 [dependencies]
+buffa = { version = "0.9.2", default-features = false }
 bytes = "1"
 thiserror = "2"
 fast-mvt = { version = "=0.7.2", default-features = false, features = ["reader"] }
@@ -41,3 +43,7 @@ default = ["gzip"]
 gzip = ["dep:flate2"]
 zstd = ["dep:zstd"]
 brotli = ["dep:brotli"]
+
+[[bench]]
+name = "compose_raw"
+harness = false

@@ -3,9 +3,9 @@
 [简体中文](README_CN.md)
 
 `composite-mvt` composes a fixed set of Mapbox Vector Tile (MVT) sources into one response body.
-It is deliberately a byte-level compositor: it does not parse, merge, rename, or validate request
-tile layers at compose time. Configure the source metadata once, then supply one byte slice per
-source for every request.
+Configure source metadata once, then supply one input per source for every request. The composer
+works at the byte level and can resolve overlapping layer names against the layers present in each
+tile.
 
 ## Quick start
 
@@ -36,22 +36,28 @@ and `inputs[n]` always belongs to source `n`.
 
 ## Compression model
 
-Input compression is source-fixed. Each `MvtSource` declares the format expected for that source's
-request bytes; `compose` decodes every configured compressed input first, and the internal merge
-only concatenates raw MVT bytes in source order. Raw inputs are borrowed during this preparation;
-compressed inputs allocate decoded buffers.
+`compose` uses the encoding configured on each `MvtSource`. When the encoding can vary by request,
+call `compose_with_encodings(&[(bytes, encoding), …])` in the same source order. Each pair selects the
+decoder for that input only. The source IDs and declared layers still come from the built composer.
+Both methods borrow raw inputs, decode compressed inputs, and combine the resulting MVT bytes in
+source order under the configured duplicate-layer policy. A zero-byte input contributes an empty
+tile and requires no codec support. When every input is zero bytes, both methods return empty bytes
+without allocating or using codecs.
 
 The composer then returns the raw composite unchanged or applies its fixed output compression once
 to the **complete** composite MVT. It never emits one compressed stream per source. Encoder settings
 are not part of the public API: enabled codecs use their default parameters, and the output format
-cannot be overridden per request.
+cannot be overridden per request. A nonempty compressed input that decodes to zero bytes still
+follows the normal output encoding path.
 
 For source metadata, `MvtSource::from_mvt` and `from_mvts` auto-detect only gzip and Zstandard
-frames; other samples are treated as raw MVT. Brotli has no reliable signature and must always use
-`from_mvt_with_compression` or `from_mvts_with_compression` with `Compression::Brotli`.
+frames; other samples are treated as raw MVT. Use `from_mvt_with_compression` or
+`from_mvts_with_compression` with `Compression::Brotli` for Brotli samples. Sample constructors
+reject empty bytes.
 
 When returning compressed bytes through HTTP, set the response header from
-`composer.output_compression().content_encoding()`:
+`composer.output_compression().content_encoding()`. Omit `Content-Encoding` for the empty result
+from all zero-byte inputs.
 
 | Output | `Content-Encoding` |
 | --- | --- |
@@ -72,31 +78,48 @@ not HTTP responses, so the calling server owns headers and cache policy.
 | `brotli` | no | Enables explicitly configured Brotli source decoding and complete-output encoding. |
 
 Selecting an unavailable codec is rejected while building the composer. `Compression::Other` is an
-unsupported marker and is never a valid source or output configuration.
+unsupported marker and is never a valid source or output configuration. A nonempty input passed
+to `compose_with_encodings` with a disabled or unsupported encoding returns a source error.
 
 ## Validation and errors
 
 `MvtComposerBuilder::validate_duplicate_layers()` can be called independently and does not consume
-or modify the builder. A repeated layer inside one source is always rejected. Between distinct
-sources, `DuplicateLayer::Error` (the default) rejects the repeat and `DuplicateLayer::Allow`
+or modify the builder. The builder rejects repeated names in a single source's declarations.
+Between distinct sources, `DuplicateLayer::Error` (the default) rejects the repeat and `DuplicateLayer::Allow`
 accepts and preserves repeated layers. Opting in may produce non-conformant output because MVT 2.1
 requires layer names within one tile to be byte-for-byte unique. See the [MVT 2.1
 specification](https://github.com/mapbox/vector-tile-spec/blob/master/2.1/README.md#41-layers).
 `build()` runs the same duplicate validation along with source ID, layer, and feature checks.
 
-Sample construction and source decoding return `SourceError`; configuration returns `BuildError`;
-and request composition returns `ComposeError`. A decompression failure identifies the configured
-source that failed. For parsed samples, both an omitted layer name and an explicitly empty layer
-name return `SourceError::MissingLayerName`; explicitly configured empty names remain
-`BuildError::EmptyLayerName`. A compose failure never returns a partial composite.
+`DuplicateLayer::KeepFirst` and `DuplicateLayer::KeepLast` accept overlapping declarations and keep
+the first or last occurrence of each layer in source order for the current tile. For example,
+`KeepLast` keeps the earlier source's `roads` when the later tile contains only `water` or is empty.
+Declare every layer a source can emit. Each input tile may contain any subset of those layers
+and must have unique layer names. For sources with overlapping declarations,
+the keep policies read layer names and check protobuf framing, including embedded feature and
+value fields. The composer copies retained fields byte-for-byte in their original order, including
+unknown fields. Sources with disjoint declarations bypass the scan.
+
+Sample construction and source decoding return `SourceError`. Configuration returns `BuildError`,
+and request composition returns `ComposeError`. A decompression or layer scan failure identifies
+the configured source. During sample parsing and layer scans, an omitted or empty layer name
+produces `SourceError::MissingLayerName`. An explicitly configured empty name produces
+`BuildError::EmptyLayerName`. Composition returns a complete result or an error.
 
 ## Concurrency and memory
 
 After `build()`, `MvtComposer` is immutable and contains no mutex, cache, or request-level mutable
-state. Share it with `Arc<MvtComposer>` across threads without library-managed locking. Each call
-owns its decoded source buffers, one raw composite allocation, and, when compression is selected, a
-separate final encoded buffer. Compression therefore briefly holds both raw and encoded composites;
-this is an intentional first-release memory trade-off rather than streaming output.
+state. Share it with `Arc<MvtComposer>` across threads without library-managed locking. Requests
+with nonempty inputs own their decoded source buffers and a raw composite buffer. Output encoding
+uses a final encoded buffer. Layer scans use request-local indexes of borrowed names and fields.
+
+Set `MvtComposerBuilder::max_decoded_bytes(max)` to cap the combined size of the decoded inputs,
+including raw bytes, in each call to either composition method. The default is `usize::MAX`.
+Totals equal to the limit are allowed, including zero. The composer enforces the limit during
+decoding and returns `ComposeError::SizeOverflow` when the total exceeds it. The limit covers the
+decoded payload, including layers discarded by the duplicate-layer policy. Codec working memory
+and encoded output use additional memory. Standalone `MvtSource::decompress` and the sample
+constructors run outside the composer's budget.
 
 ## Example
 
@@ -133,6 +156,7 @@ Reqwest client to fetch configured tile sources concurrently and includes MapLib
 
 ```text
 cargo test --all-targets --all-features
+cargo bench --locked --bench compose_raw
 ```
 
 ## License

@@ -94,8 +94,8 @@ impl fmt::Display for Compression {
 
 /// Fixed metadata for one source in an [`crate::MvtComposer`].
 ///
-/// The source's compression setting controls both sample parsing and each later request input.
-/// It is configuration, not a request-time guess.
+/// The source's compression setting selects the decoder for [`crate::MvtComposer::compose`].
+/// Use [`crate::MvtComposer::compose_with_encodings`] to supply an encoding for each input.
 #[derive(Debug, Clone)]
 pub struct MvtSource {
     id: SourceId,
@@ -116,7 +116,7 @@ impl MvtSource {
         }
     }
 
-    /// Sets the fixed compression format expected for this source's request bytes.
+    /// Sets the compression format used by [`crate::MvtComposer::compose`] for this source.
     ///
     /// Brotli input must be declared explicitly. The automatic sample constructors deliberately do
     /// not detect Brotli because it has no reliable signature.
@@ -127,6 +127,8 @@ impl MvtSource {
     }
 
     /// Replaces the source's declared layers.
+    ///
+    /// Declare every layer this source can emit. Each tile may contain a subset of these layers.
     #[must_use]
     pub fn with_layers<I, S>(mut self, layers: I) -> Self
     where
@@ -255,12 +257,13 @@ impl MvtSource {
 
     /// Decodes request bytes according to this source's fixed compression.
     ///
-    /// Raw input is returned as [`Cow::Borrowed`]; compressed input is returned as owned decoded
-    /// bytes. This method does not inspect bytes to choose a codec.
+    /// Raw and zero-byte inputs are returned as [`Cow::Borrowed`]. A zero-byte input requires no
+    /// codec support. Nonempty compressed input is returned as owned decoded bytes.
     ///
     /// # Errors
     ///
-    /// Returns a [`SourceError`] when the configured feature is disabled or decoding fails.
+    /// Returns a [`SourceError`] when a nonempty input uses a disabled or unsupported codec,
+    /// or when decoding fails.
     pub fn decompress<'a>(&self, input: &'a [u8]) -> Result<Cow<'a, [u8]>, SourceError> {
         decompress(self.compression, input)
     }
@@ -271,7 +274,7 @@ impl MvtSource {
         &self.id
     }
 
-    /// Returns the fixed compression expected for this source's inputs.
+    /// Returns the configured compression used by [`crate::MvtComposer::compose`].
     #[must_use]
     pub const fn compression(&self) -> Compression {
         self.compression

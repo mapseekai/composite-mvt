@@ -1,7 +1,6 @@
 /// Policy for repeated layer names across distinct sources.
 ///
-/// The builder always rejects a duplicate within one source. This policy only controls a layer
-/// name that occurs in two or more different sources.
+/// Each source must declare each layer name once. This policy controls names shared by sources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DuplicateLayer {
     /// Allow distinct sources to declare the same layer name.
@@ -13,4 +12,8 @@ pub enum DuplicateLayer {
     /// Reject a layer name shared by distinct sources. This is the default policy.
     #[default]
     Error,
+    /// Keep each shared layer from the earliest source that contains it in the current tile.
+    KeepFirst,
+    /// Keep each shared layer from the latest source that contains it in the current tile.
+    KeepLast,
 }

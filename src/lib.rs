@@ -6,6 +6,7 @@ mod composer;
 mod compression;
 mod duplicate_layer;
 mod error;
+mod layer_filter;
 mod source;
 
 pub use builder::MvtComposerBuilder;

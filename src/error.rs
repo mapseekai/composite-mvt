@@ -6,11 +6,10 @@ use crate::{Compression, LayerName, SourceId};
 
 pub(crate) type BoxError = Box<dyn StdError + Send + Sync + 'static>;
 
-/// Errors produced while deriving [`crate::MvtSource`] metadata from MVT samples or decoding a
-/// configured source input.
+/// Errors produced while reading [`crate::MvtSource`] metadata or processing source inputs.
 #[derive(Debug, Error)]
 pub enum SourceError {
-    /// The supplied MVT sample or request input is empty.
+    /// The supplied MVT sample is empty.
     #[error("MVT input is empty")]
     EmptyBytes,
     /// A multiple-sample constructor received no samples.
@@ -101,6 +100,13 @@ pub enum ComposeError {
         #[source]
         source: SourceError,
     },
+    /// A source with overlapping declared layers could not be scanned for layer names.
+    #[error("failed to read layers from source `{source_id}`")]
+    SourceParsing {
+        source_id: SourceId,
+        #[source]
+        source: SourceError,
+    },
     /// The complete composite output could not be encoded.
     #[error("failed to compress composite output as {compression}")]
     OutputCompression {
@@ -108,7 +114,7 @@ pub enum ComposeError {
         #[source]
         source: BoxError,
     },
-    /// The raw composite length exceeded `usize`.
-    #[error("composite MVT size overflow")]
+    /// The combined decoded length exceeds the configured limit or `usize`.
+    #[error("decoded composite MVT exceeds the size limit")]
     SizeOverflow,
 }

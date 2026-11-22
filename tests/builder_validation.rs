@@ -29,31 +29,41 @@ fn explicit_duplicate_validation_matches_build() {
         .add_source(source("a", &["shared"]))
         .add_source(source("b", &["shared"]));
 
-    let Err(BuildError::DuplicateLayerName {
-        layer,
-        first_source,
-        second_source,
-    }) = builder.validate_duplicate_layers()
-    else {
-        panic!("expected a cross-source duplicate layer");
-    };
-
-    assert_eq!(layer.as_ref(), "shared");
-    assert_eq!(first_source.as_ref(), "a");
-    assert_eq!(second_source.as_ref(), "b");
+    for result in [
+        builder.validate_duplicate_layers(),
+        builder.build().map(drop),
+    ] {
+        let Err(BuildError::DuplicateLayerName {
+            layer,
+            first_source,
+            second_source,
+        }) = result
+        else {
+            panic!("expected a cross-source duplicate layer");
+        };
+        assert_eq!(layer.as_ref(), "shared");
+        assert_eq!(first_source.as_ref(), "a");
+        assert_eq!(second_source.as_ref(), "b");
+    }
 }
 
 #[test]
 fn allows_cross_source_duplicates_when_configured() {
-    let composer = MvtComposer::builder()
-        .duplicate_layer(DuplicateLayer::Allow)
-        .add_source(source("a", &["shared"]))
-        .add_source(source("b", &["shared"]))
-        .build()
-        .unwrap();
+    for policy in [
+        DuplicateLayer::Allow,
+        DuplicateLayer::KeepFirst,
+        DuplicateLayer::KeepLast,
+    ] {
+        let builder = MvtComposer::builder()
+            .duplicate_layer(policy)
+            .add_source(source("a", &["shared"]))
+            .add_source(source("b", &["shared"]));
+        assert!(builder.validate_duplicate_layers().is_ok());
+        let composer = builder.build().unwrap();
 
-    assert_eq!(composer.sources().len(), 2);
-    assert_eq!(composer.output_compression(), Compression::None);
+        assert_eq!(composer.sources().len(), 2);
+        assert_eq!(composer.output_compression(), Compression::None);
+    }
 }
 
 #[test]
@@ -74,22 +84,27 @@ fn rejects_missing_and_empty_layers() {
 
 #[test]
 fn same_source_duplicates_are_always_invalid() {
-    let builder = MvtComposer::builder()
-        .duplicate_layer(DuplicateLayer::Allow)
-        .add_source(source("roads", &["roads", "roads"]));
+    for policy in [
+        DuplicateLayer::Error,
+        DuplicateLayer::Allow,
+        DuplicateLayer::KeepFirst,
+        DuplicateLayer::KeepLast,
+    ] {
+        let builder = MvtComposer::builder()
+            .duplicate_layer(policy)
+            .add_source(source("roads", &["roads", "roads"]));
 
-    let Err(BuildError::DuplicateLayerName {
-        layer,
-        first_source,
-        second_source,
-    }) = builder.validate_duplicate_layers()
-    else {
-        panic!("expected a same-source duplicate layer");
-    };
-
-    assert_eq!(layer.as_ref(), "roads");
-    assert_eq!(first_source.as_ref(), "roads");
-    assert_eq!(second_source.as_ref(), "roads");
+        for result in [
+            builder.validate_duplicate_layers(),
+            builder.build().map(drop),
+        ] {
+            assert!(matches!(
+                result,
+                Err(BuildError::DuplicateLayerName { layer, first_source, second_source })
+                    if layer.as_ref() == "roads" && first_source.as_ref() == "roads" && second_source.as_ref() == "roads"
+            ));
+        }
+    }
 }
 
 #[test]

@@ -1,16 +1,18 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::compression::feature_enabled;
-use crate::{BuildError, Compression, DuplicateLayer, LayerName, MvtComposer, MvtSource, SourceId};
+use crate::layer_filter::{LayerFilter, Precedence};
+use crate::{BuildError, Compression, DuplicateLayer, LayerName, MvtComposer, MvtSource};
 
-/// Configures the immutable source list and output encoding for an [`MvtComposer`].
+/// Configures an immutable [`MvtComposer`].
 ///
 /// Source configuration is fixed when [`Self::build`] succeeds. Request bytes are supplied later
-/// to [`MvtComposer::compose`], in the same order as sources are added here.
+/// in the same order as sources are added here.
 pub struct MvtComposerBuilder {
     sources: Vec<MvtSource>,
     duplicate_layer: DuplicateLayer,
     output_compression: Compression,
+    max_decoded_bytes: usize,
 }
 
 impl Default for MvtComposerBuilder {
@@ -19,6 +21,7 @@ impl Default for MvtComposerBuilder {
             sources: Vec::new(),
             duplicate_layer: DuplicateLayer::Error,
             output_compression: Compression::None,
+            max_decoded_bytes: usize::MAX,
         }
     }
 }
@@ -26,8 +29,7 @@ impl Default for MvtComposerBuilder {
 impl MvtComposerBuilder {
     /// Sets how equal layer names in separate sources are handled.
     ///
-    /// [`DuplicateLayer::Error`] is the default. A duplicate within one source is always an error,
-    /// regardless of this policy.
+    /// [`DuplicateLayer::Error`] is the default. Each source must declare each layer name once.
     #[must_use]
     pub fn duplicate_layer(mut self, behavior: DuplicateLayer) -> Self {
         self.duplicate_layer = behavior;
@@ -44,10 +46,21 @@ impl MvtComposerBuilder {
         self
     }
 
+    /// Sets the inclusive limit on total decoded bytes across all inputs in each composition.
+    ///
+    /// Raw inputs and discarded layers count toward the same limit. The default is `usize::MAX`.
+    /// A limit of zero allows only inputs that contribute zero decoded bytes. Exceeding the limit
+    /// returns [`crate::ComposeError::SizeOverflow`].
+    #[must_use]
+    pub fn max_decoded_bytes(mut self, max: usize) -> Self {
+        self.max_decoded_bytes = max;
+        self
+    }
+
     /// Adds a source to the fixed input order.
     ///
-    /// Each [`MvtComposer::compose`] call must provide exactly one byte slice for every source, in
-    /// this order.
+    /// [`MvtComposer::compose`] and [`MvtComposer::compose_with_encodings`] each require exactly one
+    /// input per source, in this order.
     #[must_use]
     pub fn add_source(mut self, source: MvtSource) -> Self {
         self.sources.push(source);
@@ -56,13 +69,22 @@ impl MvtComposerBuilder {
 
     /// Validates duplicate layer names without consuming or changing this builder.
     ///
-    /// A duplicate within one source always returns [`BuildError::DuplicateLayerName`]. A duplicate
-    /// across sources returns that error only under [`DuplicateLayer::Error`]; it is accepted under
-    /// [`DuplicateLayer::Allow`]. [`Self::build`] reuses this validation.
+    /// Repeating a name in one source's declarations returns [`BuildError::DuplicateLayerName`].
+    /// Sharing a name across sources returns that error only under [`DuplicateLayer::Error`].
+    /// [`Self::build`] reuses this validation.
     pub fn validate_duplicate_layers(&self) -> Result<(), BuildError> {
-        let mut global: HashMap<&LayerName, &SourceId> = HashMap::new();
+        self.validate_layers(None).map(drop)
+    }
 
-        for source in &self.sources {
+    fn validate_layers(
+        &self,
+        precedence: Option<Precedence>,
+    ) -> Result<Option<LayerFilter>, BuildError> {
+        let mut first_sources: HashMap<&LayerName, usize> = HashMap::new();
+        let mut scan_sources = Vec::new();
+        let reject_overlap = self.duplicate_layer == DuplicateLayer::Error;
+
+        for (index, source) in self.sources.iter().enumerate() {
             let mut local = HashSet::new();
             for layer in source.layers() {
                 if !local.insert(layer) {
@@ -73,21 +95,32 @@ impl MvtComposerBuilder {
                     });
                 }
 
-                if let Some(first_source) = global.get(layer) {
-                    if self.duplicate_layer == DuplicateLayer::Error {
+                if !reject_overlap && precedence.is_none() {
+                    continue;
+                }
+                if let Some(&first_index) = first_sources.get(layer) {
+                    if reject_overlap {
                         return Err(BuildError::DuplicateLayerName {
                             layer: layer.clone(),
-                            first_source: (*first_source).clone(),
+                            first_source: self.sources[first_index].id().clone(),
                             second_source: source.id().clone(),
                         });
                     }
+                    scan_sources.resize(self.sources.len(), false);
+                    scan_sources[first_index] = true;
+                    scan_sources[index] = true;
                 } else {
-                    global.insert(layer, source.id());
+                    first_sources.insert(layer, index);
                 }
             }
         }
 
-        Ok(())
+        Ok(precedence
+            .filter(|_| !scan_sources.is_empty())
+            .map(|precedence| LayerFilter {
+                precedence,
+                scan_sources: scan_sources.into_boxed_slice(),
+            }))
     }
 
     /// Validates all configuration and constructs an immutable, lock-free composer.
@@ -95,15 +128,17 @@ impl MvtComposerBuilder {
     /// In addition to duplicate-layer validation, this checks source IDs, required source layers,
     /// and feature support for source and output encodings.
     pub fn build(self) -> Result<MvtComposer, BuildError> {
-        self.validate()?;
+        let layer_filter = self.validate()?;
 
         Ok(MvtComposer {
             sources: self.sources.into_boxed_slice(),
             output_compression: self.output_compression,
+            max_decoded_bytes: self.max_decoded_bytes,
+            layer_filter,
         })
     }
 
-    fn validate(&self) -> Result<(), BuildError> {
+    fn validate(&self) -> Result<Option<LayerFilter>, BuildError> {
         if self.sources.is_empty() {
             return Err(BuildError::NoSources);
         }
@@ -137,13 +172,19 @@ impl MvtComposerBuilder {
             }
         }
 
-        self.validate_duplicate_layers()?;
+        let precedence = match self.duplicate_layer {
+            DuplicateLayer::KeepFirst => Some(Precedence::First),
+            DuplicateLayer::KeepLast => Some(Precedence::Last),
+            DuplicateLayer::Error | DuplicateLayer::Allow => None,
+        };
+        let layer_filter = self.validate_layers(precedence)?;
 
         for source in &self.sources {
             validate_source_compression(source)?;
         }
 
-        validate_output_compression(self.output_compression)
+        validate_output_compression(self.output_compression)?;
+        Ok(layer_filter)
     }
 }
 

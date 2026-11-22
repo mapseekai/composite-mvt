@@ -46,6 +46,14 @@ fn rejects_empty_input_and_empty_sample_set() {
         Err(SourceError::EmptyBytes)
     ));
     assert!(matches!(
+        MvtSource::from_mvt_with_compression("empty", &[], Compression::Brotli),
+        Err(SourceError::EmptyBytes)
+    ));
+    assert!(matches!(
+        MvtSource::from_mvts_with_compression("empty", [b""], Compression::Gzip),
+        Err(SourceError::EmptyBytes)
+    ));
+    assert!(matches!(
         MvtSource::from_mvts::<Vec<&[u8]>, &[u8]>("empty", Vec::new()),
         Err(SourceError::NoSamples)
     ));

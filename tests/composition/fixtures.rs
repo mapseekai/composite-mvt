@@ -1,3 +1,17 @@
+use composite_mvt::Compression;
+
+type Encode = fn(&[u8]) -> Vec<u8>;
+
+pub const CODECS: &[(Compression, Encode)] = &[
+    #[cfg(feature = "gzip")]
+    (Compression::Gzip, super::common::gzip),
+    #[cfg(feature = "zstd")]
+    (Compression::Zstd, zstd_encode),
+    #[cfg(feature = "brotli")]
+    (Compression::Brotli, brotli_encode),
+];
+
+#[cfg(feature = "gzip")]
 pub fn layer_names(bytes: &[u8]) -> Vec<String> {
     fast_mvt::MvtReaderRef::new(bytes)
         .unwrap()

@@ -18,6 +18,7 @@ fn rejects_trailing_brotli_data_in_public_decoding_paths() {
         .with_compression(Compression::Brotli);
     let composer = MvtComposer::builder()
         .add_source(source.clone())
+        .max_decoded_bytes(raw.len())
         .build()
         .unwrap();
 
@@ -61,11 +62,25 @@ fn validates_brotli_completion_across_buffer_boundaries() {
     );
 
     let small = encode(b"tile");
-    for length in 0..small.len() {
+    assert!(source.decompress(b"").unwrap().is_empty());
+    let composer = MvtComposer::builder()
+        .add_source(source.clone().with_layers(["sample"]))
+        .max_decoded_bytes(b"tile".len())
+        .build()
+        .unwrap();
+    for length in 1..small.len() {
         assert!(
             source.decompress(&small[..length]).is_err(),
             "accepted prefix {length}"
         );
+        assert!(matches!(
+            composer.compose(&[&small[..length]]),
+            Err(ComposeError::SourceDecompression {
+                source: SourceError::DecompressionFailed { .. },
+                ..
+            })
+        ));
     }
+    assert_eq!(composer.compose(&[small]).unwrap(), b"tile"[..]);
     assert!(source.decompress(&encode(b"")).unwrap().is_empty());
 }
