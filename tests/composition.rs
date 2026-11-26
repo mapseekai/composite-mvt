@@ -9,7 +9,7 @@ mod duplicate_layers;
 #[path = "composition/fixtures.rs"]
 mod fixtures;
 
-use composite_mvt::{ComposeError, Compression, MvtComposer, MvtSource, SourceError};
+use composite_mvt::{Compression, MvtComposer, MvtSource};
 
 fn composer(ids: &[&str]) -> MvtComposer {
     ids.iter()
@@ -35,31 +35,18 @@ fn composes_raw_inputs_in_source_order() {
 fn rejects_wrong_input_count_before_composition() {
     let composer = composer(&["a", "b"]);
 
-    let missing = composer.compose(&[b"only"]);
-    let extra = composer.compose(&[&b"one"[..], &b"two"[..], &b"three"[..]]);
-
-    assert!(matches!(
-        missing,
-        Err(ComposeError::InputCountMismatch {
-            expected: 2,
-            actual: 1
-        })
-    ));
-    assert!(matches!(
-        extra,
-        Err(ComposeError::InputCountMismatch {
-            expected: 2,
-            actual: 3
-        })
-    ));
+    let missing = composer.compose(&[b"only"]).unwrap_err();
+    let extra = composer
+        .compose(&[&b"one"[..], &b"two"[..], &b"three"[..]])
+        .unwrap_err();
+    assert_eq!(missing.input_count_mismatch(), Some((2, 1)));
+    assert_eq!(extra.input_count_mismatch(), Some((2, 3)));
     for inputs in [
         &[(b"invalid", Compression::Other)][..],
         &[(b"invalid", Compression::Other); 3][..],
     ] {
-        assert!(matches!(
-            composer.compose_with_encodings(inputs),
-            Err(ComposeError::InputCountMismatch { expected: 2, actual }) if actual == inputs.len()
-        ));
+        let error = composer.compose_with_encodings(inputs).unwrap_err();
+        assert_eq!(error.input_count_mismatch(), Some((2, inputs.len())));
     }
 }
 
@@ -103,10 +90,7 @@ fn zero_byte_inputs_need_no_codec() {
                 .is_empty()
         );
     }
-    assert!(matches!(
-        composer.compose(&[b"x"]),
-        Err(ComposeError::SizeOverflow)
-    ));
+    assert!(composer.compose(&[b"x"]).unwrap_err().is_size_overflow());
     assert!(composer.compose(&[b""]).unwrap().is_empty());
 }
 
@@ -119,22 +103,24 @@ fn rejects_unavailable_request_encodings_for_nonempty_inputs() {
         (Compression::Brotli, cfg!(feature = "brotli")),
     ] {
         if !enabled {
-            assert!(matches!(
-                composer.compose_with_encodings(&[(b"x", encoding)]),
-                Err(ComposeError::SourceDecompression {
-                    source_id,
-                    source: SourceError::CompressionFeatureDisabled { compression }
-                }) if source_id.as_ref() == "roads" && compression == encoding
-            ));
+            let error = composer
+                .compose_with_encodings(&[(b"x", encoding)])
+                .unwrap_err();
+            assert!(error.is_source_decompression());
+            assert_eq!(error.source_id().map(AsRef::as_ref), Some("roads"));
+            let source = error.source_error().unwrap();
+            assert!(source.is_compression_feature_disabled());
+            assert_eq!(source.compression(), Some(encoding));
         }
     }
-    assert!(matches!(
-        composer.compose_with_encodings(&[(b"x", Compression::Other)]),
-        Err(ComposeError::SourceDecompression {
-            source_id,
-            source: SourceError::UnsupportedCompression { compression: Compression::Other }
-        }) if source_id.as_ref() == "roads"
-    ));
+    let error = composer
+        .compose_with_encodings(&[(b"x", Compression::Other)])
+        .unwrap_err();
+    assert!(error.is_source_decompression());
+    assert_eq!(error.source_id().map(AsRef::as_ref), Some("roads"));
+    let source = error.source_error().unwrap();
+    assert!(source.is_unsupported_compression());
+    assert_eq!(source.compression(), Some(Compression::Other));
 }
 
 #[test]
@@ -145,10 +131,12 @@ fn decoded_budget_counts_all_raw_sources_and_resets_per_call() {
         .max_decoded_bytes(4)
         .build()
         .unwrap();
-    assert!(matches!(
-        composer.compose(&[b"abc".as_slice(), b"de"]),
-        Err(ComposeError::SizeOverflow)
-    ));
+    assert!(
+        composer
+            .compose(&[b"abc".as_slice(), b"de"])
+            .unwrap_err()
+            .is_size_overflow()
+    );
     assert_eq!(composer.compose(&[b"ab", b"cd"]).unwrap(), b"abcd"[..]);
 }
 
@@ -170,14 +158,18 @@ fn request_encodings_share_the_budget_and_keep_output_encoding_fixed() {
         let prefix = b"ab".as_slice();
         let over = encode(b"cde");
         let exact = encode(b"cd");
-        assert!(matches!(
-            composer.compose(&[prefix, &over]),
-            Err(ComposeError::SizeOverflow)
-        ));
-        assert!(matches!(
-            composer.compose_with_encodings(&[(prefix, Compression::None), (&over, encoding)]),
-            Err(ComposeError::SizeOverflow)
-        ));
+        assert!(
+            composer
+                .compose(&[prefix, &over])
+                .unwrap_err()
+                .is_size_overflow()
+        );
+        assert!(
+            composer
+                .compose_with_encodings(&[(prefix, Compression::None), (&over, encoding)])
+                .unwrap_err()
+                .is_size_overflow()
+        );
         assert_eq!(
             composer
                 .compose_with_encodings(&[
@@ -221,10 +213,12 @@ fn request_encodings_share_the_budget_and_keep_output_encoding_fixed() {
                 composer.compose(&[b"".as_slice(), &multistream]).unwrap(),
                 encode(b"cdcd")
             );
-            assert!(matches!(
-                composer.compose(&[prefix, &multistream]),
-                Err(ComposeError::SizeOverflow)
-            ));
+            assert!(
+                composer
+                    .compose(&[prefix, &multistream])
+                    .unwrap_err()
+                    .is_size_overflow()
+            );
         }
 
         let unlimited = MvtComposer::builder()
@@ -289,6 +283,8 @@ fn composes_all_layers_from_concatenated_gzip_members() {
 #[cfg(feature = "gzip")]
 #[test]
 fn reports_the_source_that_failed_decompression() {
+    use std::error::Error;
+
     let composer = MvtComposer::builder()
         .add_source(
             MvtSource::new("roads")
@@ -300,62 +296,45 @@ fn reports_the_source_that_failed_decompression() {
 
     let error = composer.compose(&[b"not-gzip"]).unwrap_err();
 
-    assert!(matches!(
-        error,
-        ComposeError::SourceDecompression { source_id, .. }
-            if source_id.as_ref() == "roads"
-    ));
+    let _: &(dyn Error + Send + Sync) = &error;
+    let _: &std::backtrace::Backtrace = error.backtrace();
+    assert!(error.is_source_decompression());
+    assert_eq!(error.source_id().map(AsRef::as_ref), Some("roads"));
+    let source = error.source_error().unwrap();
+    assert!(source.is_decompression_failed());
+    assert_eq!(source.compression(), Some(Compression::Gzip));
+    assert!(error.source().unwrap().is::<composite_mvt::SourceError>());
+    assert!(source.source().unwrap().is::<std::io::Error>());
 }
 
 #[cfg(feature = "gzip")]
 #[test]
 fn compresses_the_complete_output_with_dependency_defaults() {
-    let first = common::tile_with_layers(&["roads"]);
-    let second = common::tile_with_layers(&["water"]);
-    let expected_raw: Vec<u8> = first.iter().chain(&second).copied().collect();
-    let expected = common::gzip(&expected_raw);
-    let composer = MvtComposer::builder()
-        .add_source(MvtSource::new("roads").with_layers(["roads"]))
-        .add_source(MvtSource::new("water").with_layers(["water"]))
-        .output_compression(Compression::Gzip)
-        .build()
-        .unwrap();
-
-    let output = composer.compose(&[first, second]).unwrap();
-
-    assert_eq!(output.as_ref(), expected);
+    assert_complete_output_encoding(Compression::Gzip, common::gzip);
 }
 
 #[cfg(feature = "zstd")]
 #[test]
 fn compresses_the_complete_output_with_zstd_defaults() {
-    let first = common::tile_with_layers(&["roads"]);
-    let second = common::tile_with_layers(&["water"]);
-    let expected_raw: Vec<u8> = first.iter().chain(&second).copied().collect();
-    let expected = fixtures::zstd_encode(&expected_raw);
-    let composer = MvtComposer::builder()
-        .add_source(MvtSource::new("roads").with_layers(["roads"]))
-        .add_source(MvtSource::new("water").with_layers(["water"]))
-        .output_compression(Compression::Zstd)
-        .build()
-        .unwrap();
-
-    let output = composer.compose(&[first, second]).unwrap();
-
-    assert_eq!(output.as_ref(), expected);
+    assert_complete_output_encoding(Compression::Zstd, fixtures::zstd_encode);
 }
 
 #[cfg(feature = "brotli")]
 #[test]
 fn compresses_the_complete_output_with_brotli_defaults() {
+    assert_complete_output_encoding(Compression::Brotli, fixtures::brotli_encode);
+}
+
+#[cfg(any(feature = "gzip", feature = "zstd", feature = "brotli"))]
+fn assert_complete_output_encoding(compression: Compression, encode: fn(&[u8]) -> Vec<u8>) {
     let first = common::tile_with_layers(&["roads"]);
     let second = common::tile_with_layers(&["water"]);
     let expected_raw: Vec<u8> = first.iter().chain(&second).copied().collect();
-    let expected = fixtures::brotli_encode(&expected_raw);
+    let expected = encode(&expected_raw);
     let composer = MvtComposer::builder()
         .add_source(MvtSource::new("roads").with_layers(["roads"]))
         .add_source(MvtSource::new("water").with_layers(["water"]))
-        .output_compression(Compression::Brotli)
+        .output_compression(compression)
         .build()
         .unwrap();
 

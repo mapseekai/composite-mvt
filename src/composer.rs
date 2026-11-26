@@ -1,16 +1,18 @@
 use bytes::Bytes;
 
-use crate::compression::{DecodeError, compress, decompress_limited};
+use crate::compression::{self, DecodeError, OutputCompression};
+use crate::error::ComposeErrorKind;
 use crate::layer_filter::LayerFilter;
 use crate::{ComposeError, Compression, MvtComposerBuilder, MvtSource};
 
 /// An immutable composition plan for fixed MVT sources.
 ///
 /// A composer contains only owned configuration and can be shared as `Arc<MvtComposer>` without
-/// library-managed locks. Each request owns its decompression and output buffers.
+/// library-managed locks. Requests borrow raw inputs and own any decompressed and output buffers.
+#[derive(Debug)]
 pub struct MvtComposer {
     pub(crate) sources: Box<[MvtSource]>,
-    pub(crate) output_compression: Compression,
+    pub(crate) output_compression: OutputCompression,
     pub(crate) max_decoded_bytes: usize,
     pub(crate) layer_filter: Option<LayerFilter>,
 }
@@ -31,10 +33,13 @@ impl MvtComposer {
     /// Returns the fixed output encoding selected during building.
     #[must_use]
     pub const fn output_compression(&self) -> Compression {
-        self.output_compression
+        self.output_compression.compression()
     }
 
     /// Composes one input per configured source, preserving source order.
+    ///
+    /// Supply input tiles with the same projection, geographic bounds, and coordinate orientation.
+    /// Check the tile scheme as well as the XYZ values when combining tiles from different sources.
     ///
     /// `inputs[n]` is decoded according to `self.sources()[n].compression()`. A zero-byte input
     /// contributes an empty tile regardless of the encoding. When every input is zero bytes,
@@ -52,11 +57,9 @@ impl MvtComposer {
     ///
     /// # Errors
     ///
-    /// Returns [`ComposeError::InputCountMismatch`] when the input count differs from the fixed
-    /// source count, [`ComposeError::SourceDecompression`] when a configured input cannot be
-    /// decoded, [`ComposeError::SourceParsing`] when a source's layer scan fails,
-    /// [`ComposeError::SizeOverflow`] when the total decoded size exceeds the configured limit,
-    /// or [`ComposeError::OutputCompression`] when output encoding fails.
+    /// Returns [`ComposeError`] for an input count mismatch, a failure to decode or scan an input,
+    /// an exceeded decoded size limit, or an output encoding failure. Use
+    /// [`ComposeError::source_id`] to identify a source that failed decoding or scanning.
     pub fn compose<B>(&self, inputs: &[B]) -> Result<Bytes, ComposeError>
     where
         B: AsRef<[u8]>,
@@ -70,14 +73,14 @@ impl MvtComposer {
     ///
     /// Each `(bytes, encoding)` pair corresponds to the source at the same index. The per-input
     /// encodings apply only to this call. Source metadata and [`Self::output_compression`] come
-    /// from the built composer. Zero-byte inputs use the same empty-tile behavior as
+    /// from the built composer. Input tiles follow the spatial alignment and empty-tile rules of
     /// [`Self::compose`].
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`Self::compose`], including
-    /// [`ComposeError::SourceDecompression`] with the original source ID when a nonempty input
-    /// uses a disabled or unsupported codec.
+    /// Returns the same errors as [`Self::compose`]. A nonempty input with a disabled or
+    /// unsupported codec reports a [source decompression error](ComposeError::is_source_decompression)
+    /// with the configured source ID.
     pub fn compose_with_encodings<B: AsRef<[u8]>>(
         &self,
         inputs: &[(B, Compression)],
@@ -91,10 +94,11 @@ impl MvtComposer {
         resolve: impl Fn(&MvtSource, &'a B) -> (&'a [u8], Compression),
     ) -> Result<Bytes, ComposeError> {
         if inputs.len() != self.sources.len() {
-            return Err(ComposeError::InputCountMismatch {
+            return Err(ComposeErrorKind::InputCountMismatch {
                 expected: self.sources.len(),
                 actual: inputs.len(),
-            });
+            }
+            .into());
         }
 
         let mut remaining = self.max_decoded_bytes;
@@ -107,12 +111,16 @@ impl MvtComposer {
                 continue;
             }
             let raw =
-                decompress_limited(encoding, bytes, remaining).map_err(|error| match error {
-                    DecodeError::Source(source_error) => ComposeError::SourceDecompression {
-                        source_id: source.id().clone(),
-                        source: source_error,
-                    },
-                    DecodeError::SizeLimit => ComposeError::SizeOverflow,
+                compression::decompress_limited(encoding, bytes, remaining).map_err(|error| {
+                    match error {
+                        DecodeError::Source(source_error) => {
+                            ComposeErrorKind::SourceDecompression {
+                                source_id: source.id().clone(),
+                                cause: Box::new(source_error),
+                            }
+                        }
+                        DecodeError::SizeLimit => ComposeErrorKind::SizeOverflow,
+                    }
                 })?;
             remaining -= raw.len();
             if let Some(slot) = inline_slots.next() {
@@ -143,13 +151,12 @@ impl MvtComposer {
             output
         };
 
-        let compression = self.output_compression;
-        if compression == Compression::None {
-            return Ok(Bytes::from(output));
-        }
-        compress(compression, &output).map_err(|source| ComposeError::OutputCompression {
-            compression,
-            source,
+        self.output_compression.encode(output).map_err(|cause| {
+            ComposeErrorKind::OutputCompression {
+                compression: self.output_compression(),
+                cause,
+            }
+            .into()
         })
     }
 }

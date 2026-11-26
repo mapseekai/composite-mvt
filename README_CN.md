@@ -31,6 +31,8 @@ assert_eq!(composer.output_compression().content_encoding(), Some("gzip"));
 
 `add_source` 的调用顺序固定了源顺序。`compose(&inputs)` 必须接收相同数量的输入，且 `inputs[n]` 始终对应第 `n` 个源。
 
+调用方须确保各输入瓦片的投影、地理范围和坐标方向一致。合并不同来源的瓦片时，请同时核对瓦片方案和 XYZ 值。
+
 ## 压缩模型
 
 `compose` 使用各个 `MvtSource` 配置的压缩格式。如果输入格式随请求变化，可以按相同的源顺序调用 `compose_with_encodings(&[(bytes, encoding), …])`。每个二元组为本次调用的对应输入指定解码格式，源 ID 与声明的图层仍取自已构建的合成器。两种方法均借用原始输入、解码压缩输入，再按源顺序和配置的重名策略合并原始 MVT 字节。零字节输入按空瓦片处理，无需启用对应编解码器。所有输入均为零字节时，两种方法均直接返回空字节，无需分配内存或调用编解码器。
@@ -66,15 +68,15 @@ Gzip 输出是包裹完整合成 MVT 的单个 gzip member。此 crate 只创建
 
 `DuplicateLayer::KeepFirst` 与 `DuplicateLayer::KeepLast` 接受不同源声明同名图层，并按源顺序保留当前瓦片中最先或最后出现的同名图层。例如，两个源都声明了 `roads`，后一个源在这张瓦片中只有 `water` 或传入空切片，`KeepLast` 会保留前一个源的 `roads`。
 
-请声明每个源可能输出的所有图层，并确保同一输入瓦片内的图层名唯一。每张瓦片可以只包含声明中的一部分图层。合成器仅对声明重叠的源读取图层名，并检查 Protobuf 字段边界，包括嵌套的要素和属性值。保留的字段按原顺序逐字节复制，包括未知字段。
+请声明每个源可能输出的所有图层，并确保同一输入瓦片内的图层名唯一。每张瓦片可以只包含声明中的一部分图层。使用 `KeepFirst` 或 `KeepLast` 时，合成器仅对声明重叠的源读取图层名，并检查 Protobuf 字段边界，包括嵌套的要素和属性值。保留的字段按原顺序逐字节复制，包括未知字段。
 
-`build()` 会执行相同的重复图层校验，以及源 ID、图层和功能特性校验。样本构造与源解码返回 `SourceError`，配置返回 `BuildError`，请求合成返回 `ComposeError`。解压或图层扫描失败时会指出出错的已配置源。解析样本或扫描图层时，缺失或为空的图层名会产生 `SourceError::MissingLayerName`。显式配置的空名称会产生 `BuildError::EmptyLayerName`。合成失败不会返回部分合成结果。
+`build()` 会执行相同的重复图层校验，以及源 ID、图层和功能特性校验。样本构造与源解码返回 `SourceError`，配置返回 `BuildError`，请求合成返回 `ComposeError`。可用 `BuildError::duplicate_layer_name()` 查看重名图层及其两个来源，用 `ComposeError::source_id()` 找到解压或扫描失败的源。MVT 数据中的缺失或空图层名由 `SourceError::is_missing_layer_name()` 识别，显式配置的空名称由 `BuildError::is_empty_layer_name()` 识别。三种错误均可通过 `backtrace()` 查看回溯，并通过 `std::error::Error::source()` 查看已有的底层错误。合成返回完整结果或错误。
 
 ## 并发与内存
 
-`build()` 完成后，`MvtComposer` 不可变，且不包含互斥锁、缓存或请求级可变状态。可将其放入 `Arc<MvtComposer>` 并在线程间共享，无需库管理的锁。含非空输入的请求拥有自己的已解码源缓冲区与原始合成缓冲区，输出压缩使用额外的编码缓冲区。图层扫描在请求内部为借用的图层名和字段建立索引。
+`build()` 完成后，`MvtComposer` 不可变，且不包含互斥锁、缓存或请求级可变状态。可将其放入 `Arc<MvtComposer>` 并在线程间共享，无需库管理的锁。合成器借用原始输入，并为非空压缩输入持有解码缓冲区。原始合成结果使用单独的缓冲区，输出压缩使用额外的编码缓冲区。图层扫描在请求内部为借用的图层名和字段建立索引。
 
-通过 `MvtComposerBuilder::max_decoded_bytes(max)` 可限制任一合成方法单次调用的解码后总字节数，原始输入与重名策略丢弃的图层也计入上限。默认值为 `usize::MAX`，总数等于上限时允许通过，上限可设为零。合成器在解码过程中执行此限制，超限时返回 `ComposeError::SizeOverflow`。编解码器的工作内存及编码后的输出另计。单独调用 `MvtSource::decompress` 或从样本构造源时，不使用合成器的上限。
+通过 `MvtComposerBuilder::max_decoded_bytes(max)` 可限制任一合成方法单次调用的解码后总字节数，原始输入与重名策略丢弃的图层也计入上限。默认值为 `usize::MAX`，总数等于上限时允许通过，上限可设为零。合成器在解码过程中执行此限制，可用 `ComposeError::is_size_overflow()` 识别超限错误。编解码器的工作内存及编码后的输出另计。单独调用 `MvtSource::decompress` 或从样本构造源时，不使用合成器的上限。
 
 ## 示例
 

@@ -5,7 +5,8 @@ use std::fmt;
 use fast_mvt::{MvtError, MvtReaderRef};
 
 use crate::SourceError;
-use crate::compression::{decompress, detect_compression};
+use crate::compression;
+use crate::error::SourceErrorKind;
 
 macro_rules! string_newtype {
     ($name:ident, $description:literal) => {
@@ -150,11 +151,7 @@ impl MvtSource {
     /// Returns a [`SourceError`] for empty input, disabled or invalid compression, or invalid MVT
     /// data.
     pub fn from_mvt(id: impl Into<SourceId>, bytes: &[u8]) -> Result<Self, SourceError> {
-        if bytes.is_empty() {
-            return Err(SourceError::EmptyBytes);
-        }
-
-        Self::from_mvt_with_compression(id, bytes, detect_compression(bytes))
+        Self::from_mvt_with_compression(id, bytes, compression::detect_compression(bytes))
     }
 
     /// Reads source metadata from one sample using an explicitly declared compression format.
@@ -170,10 +167,10 @@ impl MvtSource {
         compression: Compression,
     ) -> Result<Self, SourceError> {
         if bytes.is_empty() {
-            return Err(SourceError::EmptyBytes);
+            return Err(SourceErrorKind::EmptyBytes.into());
         }
 
-        let raw = decompress(compression, bytes)?;
+        let raw = compression::decompress(compression, bytes)?;
         Ok(Self {
             id: id.into(),
             compression,
@@ -181,10 +178,11 @@ impl MvtSource {
         })
     }
 
-    /// Reads and unions layers from multiple representative samples with auto-detected encoding.
+    /// Reads layer names from multiple representative samples with auto-detected encoding.
     ///
-    /// All samples must detect as the same raw, gzip, or Zstandard format. Brotli is not
-    /// auto-detected; use [`Self::from_mvts_with_compression`] for Brotli samples.
+    /// All samples must detect as the same raw, gzip, or Zstandard format. Use
+    /// [`Self::from_mvts_with_compression`] for Brotli samples and for details on layer order and
+    /// repeated names.
     ///
     /// # Errors
     ///
@@ -195,22 +193,25 @@ impl MvtSource {
         B: AsRef<[u8]>,
     {
         let inputs: Vec<B> = inputs.into_iter().collect();
-        let first = inputs.first().ok_or(SourceError::NoSamples)?;
-        let expected = detect_compression(first.as_ref());
+        let (first, rest) = inputs.split_first().ok_or(SourceErrorKind::NoSamples)?;
+        let expected = compression::detect_compression(first.as_ref());
 
-        for input in &inputs {
-            let actual = detect_compression(input.as_ref());
+        for input in rest {
+            let actual = compression::detect_compression(input.as_ref());
             if actual != expected {
-                return Err(SourceError::InconsistentSampleCompression { expected, actual });
+                return Err(
+                    SourceErrorKind::InconsistentSampleCompression { expected, actual }.into(),
+                );
             }
         }
 
         Self::from_mvts_with_compression(id, inputs, expected)
     }
 
-    /// Reads and unions layers from multiple samples using an explicit compression format.
+    /// Reads layer names from multiple samples using an explicit compression format.
     ///
-    /// Layers retain the order of their first occurrence across the samples.
+    /// Collects layer names in first-seen order across samples. Additional occurrences of a name
+    /// within a single sample are retained so the composer builder can reject the duplicate.
     ///
     /// # Errors
     ///
@@ -231,10 +232,10 @@ impl MvtSource {
         for input in inputs {
             found_sample = true;
             if input.as_ref().is_empty() {
-                return Err(SourceError::EmptyBytes);
+                return Err(SourceErrorKind::EmptyBytes.into());
             }
 
-            let raw = decompress(compression, input.as_ref())?;
+            let raw = compression::decompress(compression, input.as_ref())?;
             let mut sample_seen = HashSet::new();
             for layer in read_layers(raw.as_ref())? {
                 if !sample_seen.insert(layer.clone()) || !seen.contains(&layer) {
@@ -245,7 +246,7 @@ impl MvtSource {
         }
 
         if !found_sample {
-            return Err(SourceError::NoSamples);
+            return Err(SourceErrorKind::NoSamples.into());
         }
 
         Ok(Self {
@@ -265,7 +266,7 @@ impl MvtSource {
     /// Returns a [`SourceError`] when a nonempty input uses a disabled or unsupported codec,
     /// or when decoding fails.
     pub fn decompress<'a>(&self, input: &'a [u8]) -> Result<Cow<'a, [u8]>, SourceError> {
-        decompress(self.compression, input)
+        compression::decompress(self.compression, input)
     }
 
     /// Returns this source's stable identifier.
@@ -289,13 +290,13 @@ impl MvtSource {
 
 fn read_layers(bytes: &[u8]) -> Result<Box<[LayerName]>, SourceError> {
     let reader = MvtReaderRef::new(bytes).map_err(|error| match error {
-        MvtError::MissingLayerName => SourceError::MissingLayerName,
-        _ => SourceError::InvalidMvt,
+        MvtError::MissingLayerName => SourceErrorKind::MissingLayerName.into(),
+        error => SourceError::invalid_mvt(error),
     })?;
     let layers: Box<[LayerName]> = reader.layers().map(|layer| layer.name().into()).collect();
 
     if layers.is_empty() {
-        return Err(SourceError::NoLayers);
+        return Err(SourceErrorKind::NoLayers.into());
     }
 
     Ok(layers)

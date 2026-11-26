@@ -34,6 +34,9 @@ assert_eq!(composer.output_compression().content_encoding(), Some("gzip"));
 The source order is fixed by `add_source`. `compose(&inputs)` requires exactly that many inputs,
 and `inputs[n]` always belongs to source `n`.
 
+Supply input tiles with the same projection, geographic bounds, and coordinate orientation. Check
+the tile scheme as well as the XYZ values when combining tiles from different sources.
+
 ## Compression model
 
 `compose` uses the encoding configured on each `MvtSource`. When the encoding can vary by request,
@@ -101,22 +104,25 @@ value fields. The composer copies retained fields byte-for-byte in their origina
 unknown fields. Sources with disjoint declarations bypass the scan.
 
 Sample construction and source decoding return `SourceError`. Configuration returns `BuildError`,
-and request composition returns `ComposeError`. A decompression or layer scan failure identifies
-the configured source. During sample parsing and layer scans, an omitted or empty layer name
-produces `SourceError::MissingLayerName`. An explicitly configured empty name produces
-`BuildError::EmptyLayerName`. Composition returns a complete result or an error.
+and request composition returns `ComposeError`. Use `BuildError::duplicate_layer_name()` to inspect
+repeated declarations and `ComposeError::source_id()` to identify a source that failed decoding or
+scanning. Use `SourceError::is_missing_layer_name()` for omitted or empty names in MVT data and
+`BuildError::is_empty_layer_name()` for empty names in the configuration. Each error exposes a
+`backtrace()` and any underlying failures through `std::error::Error::source()`.
+Composition returns a complete result or an error.
 
 ## Concurrency and memory
 
 After `build()`, `MvtComposer` is immutable and contains no mutex, cache, or request-level mutable
-state. Share it with `Arc<MvtComposer>` across threads without library-managed locking. Requests
-with nonempty inputs own their decoded source buffers and a raw composite buffer. Output encoding
-uses a final encoded buffer. Layer scans use request-local indexes of borrowed names and fields.
+state. Share it with `Arc<MvtComposer>` across threads without library-managed locking. The composer
+borrows raw inputs and owns the buffers decoded from nonempty compressed inputs. It builds the raw
+composite in a separate buffer and uses another buffer when encoding the output. Layer scans use
+request-local indexes of borrowed names and fields.
 
 Set `MvtComposerBuilder::max_decoded_bytes(max)` to cap the combined size of the decoded inputs,
 including raw bytes, in each call to either composition method. The default is `usize::MAX`.
 Totals equal to the limit are allowed, including zero. The composer enforces the limit during
-decoding and returns `ComposeError::SizeOverflow` when the total exceeds it. The limit covers the
+decoding. Use `ComposeError::is_size_overflow()` to identify a limit error. The limit covers the
 decoded payload, including layers discarded by the duplicate-layer policy. Codec working memory
 and encoded output use additional memory. Standalone `MvtSource::decompress` and the sample
 constructors run outside the composer's budget.

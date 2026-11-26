@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::compression::feature_enabled;
+use crate::compression::{self, OutputCompression};
+use crate::error::BuildErrorKind;
 use crate::layer_filter::{LayerFilter, Precedence};
 use crate::{BuildError, Compression, DuplicateLayer, LayerName, MvtComposer, MvtSource};
 
@@ -8,6 +9,7 @@ use crate::{BuildError, Compression, DuplicateLayer, LayerName, MvtComposer, Mvt
 ///
 /// Source configuration is fixed when [`Self::build`] succeeds. Request bytes are supplied later
 /// in the same order as sources are added here.
+#[derive(Debug)]
 pub struct MvtComposerBuilder {
     sources: Vec<MvtSource>,
     duplicate_layer: DuplicateLayer,
@@ -50,7 +52,8 @@ impl MvtComposerBuilder {
     ///
     /// Raw inputs and discarded layers count toward the same limit. The default is `usize::MAX`.
     /// A limit of zero allows only inputs that contribute zero decoded bytes. Exceeding the limit
-    /// returns [`crate::ComposeError::SizeOverflow`].
+    /// returns a [`crate::ComposeError`] that can be identified with
+    /// [`crate::ComposeError::is_size_overflow`].
     #[must_use]
     pub fn max_decoded_bytes(mut self, max: usize) -> Self {
         self.max_decoded_bytes = max;
@@ -69,9 +72,9 @@ impl MvtComposerBuilder {
 
     /// Validates duplicate layer names without consuming or changing this builder.
     ///
-    /// Repeating a name in one source's declarations returns [`BuildError::DuplicateLayerName`].
-    /// Sharing a name across sources returns that error only under [`DuplicateLayer::Error`].
-    /// [`Self::build`] reuses this validation.
+    /// Repeating a name within one source always produces an error. Sharing a name across sources
+    /// produces an error under [`DuplicateLayer::Error`]. Use [`BuildError::duplicate_layer_name`]
+    /// to inspect the conflicting declarations. [`Self::build`] reuses this validation.
     pub fn validate_duplicate_layers(&self) -> Result<(), BuildError> {
         self.validate_layers(None).map(drop)
     }
@@ -87,12 +90,13 @@ impl MvtComposerBuilder {
         for (index, source) in self.sources.iter().enumerate() {
             let mut local = HashSet::new();
             for layer in source.layers() {
-                if !local.insert(layer) {
-                    return Err(BuildError::DuplicateLayerName {
+                if !reject_overlap && !local.insert(layer) {
+                    return Err(BuildErrorKind::DuplicateLayerName {
                         layer: layer.clone(),
                         first_source: source.id().clone(),
                         second_source: source.id().clone(),
-                    });
+                    }
+                    .into());
                 }
 
                 if !reject_overlap && precedence.is_none() {
@@ -100,11 +104,12 @@ impl MvtComposerBuilder {
                 }
                 if let Some(&first_index) = first_sources.get(layer) {
                     if reject_overlap {
-                        return Err(BuildError::DuplicateLayerName {
+                        return Err(BuildErrorKind::DuplicateLayerName {
                             layer: layer.clone(),
                             first_source: self.sources[first_index].id().clone(),
                             second_source: source.id().clone(),
-                        });
+                        }
+                        .into());
                     }
                     scan_sources.resize(self.sources.len(), false);
                     scan_sources[first_index] = true;
@@ -129,10 +134,11 @@ impl MvtComposerBuilder {
     /// and feature support for source and output encodings.
     pub fn build(self) -> Result<MvtComposer, BuildError> {
         let layer_filter = self.validate()?;
+        let output_compression = validate_output_compression(self.output_compression)?;
 
         Ok(MvtComposer {
             sources: self.sources.into_boxed_slice(),
-            output_compression: self.output_compression,
+            output_compression,
             max_decoded_bytes: self.max_decoded_bytes,
             layer_filter,
         })
@@ -140,23 +146,25 @@ impl MvtComposerBuilder {
 
     fn validate(&self) -> Result<Option<LayerFilter>, BuildError> {
         if self.sources.is_empty() {
-            return Err(BuildError::NoSources);
+            return Err(BuildErrorKind::NoSources.into());
         }
 
         let mut ids = HashSet::new();
         for source in &self.sources {
             if !ids.insert(source.id()) {
-                return Err(BuildError::DuplicateSourceId {
+                return Err(BuildErrorKind::DuplicateSourceId {
                     id: source.id().clone(),
-                });
+                }
+                .into());
             }
         }
 
         for source in &self.sources {
             if source.layers().is_empty() {
-                return Err(BuildError::NoLayers {
+                return Err(BuildErrorKind::NoLayers {
                     source_id: source.id().clone(),
-                });
+                }
+                .into());
             }
         }
 
@@ -166,9 +174,10 @@ impl MvtComposerBuilder {
                 .iter()
                 .any(|layer| layer.as_ref().is_empty())
             {
-                return Err(BuildError::EmptyLayerName {
+                return Err(BuildErrorKind::EmptyLayerName {
                     source_id: source.id().clone(),
-                });
+                }
+                .into());
             }
         }
 
@@ -183,7 +192,6 @@ impl MvtComposerBuilder {
             validate_source_compression(source)?;
         }
 
-        validate_output_compression(self.output_compression)?;
         Ok(layer_filter)
     }
 }
@@ -191,28 +199,30 @@ impl MvtComposerBuilder {
 fn validate_source_compression(source: &MvtSource) -> Result<(), BuildError> {
     let compression = source.compression();
     if compression == Compression::Other {
-        return Err(BuildError::UnsupportedCompression {
+        return Err(BuildErrorKind::UnsupportedCompression {
             source_id: source.id().clone(),
             compression,
-        });
+        }
+        .into());
     }
-    if !feature_enabled(compression) {
-        return Err(BuildError::CompressionFeatureDisabled {
+    if !compression::feature_enabled(compression) {
+        return Err(BuildErrorKind::CompressionFeatureDisabled {
             source_id: source.id().clone(),
             compression,
-        });
+        }
+        .into());
     }
 
     Ok(())
 }
 
-fn validate_output_compression(compression: Compression) -> Result<(), BuildError> {
-    if compression == Compression::Other {
-        return Err(BuildError::UnsupportedOutputCompression { compression });
-    }
-    if !feature_enabled(compression) {
-        return Err(BuildError::OutputCompressionFeatureDisabled { compression });
-    }
-
-    Ok(())
+fn validate_output_compression(compression: Compression) -> Result<OutputCompression, BuildError> {
+    OutputCompression::from_compression(compression).ok_or_else(|| {
+        let kind = if compression == Compression::Other {
+            BuildErrorKind::UnsupportedOutputCompression { compression }
+        } else {
+            BuildErrorKind::OutputCompressionFeatureDisabled { compression }
+        };
+        kind.into()
+    })
 }

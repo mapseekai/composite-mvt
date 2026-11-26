@@ -1,6 +1,6 @@
 #![cfg(feature = "brotli")]
 
-use composite_mvt::{ComposeError, Compression, MvtComposer, MvtSource, SourceError};
+use composite_mvt::{Compression, MvtComposer, MvtSource};
 
 fn encode(raw: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
@@ -24,19 +24,15 @@ fn rejects_trailing_brotli_data_in_public_decoding_paths() {
 
     for suffix in [b"junk".as_slice(), encoded.as_slice()] {
         let input = [encoded.as_slice(), suffix].concat();
-        assert!(matches!(
-            source.decompress(&input),
-            Err(SourceError::DecompressionFailed { .. })
-        ));
-        assert!(matches!(
-            MvtSource::from_mvt_with_compression("sample", &input, Compression::Brotli),
-            Err(SourceError::DecompressionFailed { .. })
-        ));
-        assert!(matches!(
-            composer.compose(&[input]),
-            Err(ComposeError::SourceDecompression { source_id, source: SourceError::DecompressionFailed { .. } })
-                if source_id.as_ref() == "brotli-source"
-        ));
+        let error = source.decompress(&input).unwrap_err();
+        assert!(error.is_decompression_failed());
+        let error = MvtSource::from_mvt_with_compression("sample", &input, Compression::Brotli)
+            .unwrap_err();
+        assert!(error.is_decompression_failed());
+        let error = composer.compose(&[input]).unwrap_err();
+        assert!(error.is_source_decompression());
+        assert_eq!(error.source_id().map(AsRef::as_ref), Some("brotli-source"));
+        assert!(error.source_error().unwrap().is_decompression_failed());
     }
 }
 
@@ -73,13 +69,9 @@ fn validates_brotli_completion_across_buffer_boundaries() {
             source.decompress(&small[..length]).is_err(),
             "accepted prefix {length}"
         );
-        assert!(matches!(
-            composer.compose(&[&small[..length]]),
-            Err(ComposeError::SourceDecompression {
-                source: SourceError::DecompressionFailed { .. },
-                ..
-            })
-        ));
+        let error = composer.compose(&[&small[..length]]).unwrap_err();
+        assert!(error.is_source_decompression());
+        assert!(error.source_error().unwrap().is_decompression_failed());
     }
     assert_eq!(composer.compose(&[small]).unwrap(), b"tile"[..]);
     assert!(source.decompress(&encode(b"")).unwrap().is_empty());

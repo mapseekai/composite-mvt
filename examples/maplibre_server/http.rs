@@ -1,18 +1,22 @@
 use std::sync::Arc;
 
-use axum::{
-    Router,
-    body::{Body, Bytes},
-    extract::State,
-    http::{Method, StatusCode, Uri},
-    response::Response,
-    routing::any,
-};
+use axum::Router;
+use axum::body::{Body, Bytes};
+use axum::extract::State;
+use axum::http::{Method, StatusCode, Uri};
+use axum::response::Response;
+use axum::routing;
 
 use crate::state::AppState;
 
+const HTML: &[u8] = include_bytes!("../maplibre/index.html");
+const MAPLIBRE_JS: &[u8] = include_bytes!("../maplibre/maplibre-gl.js");
+const MAPLIBRE_CSS: &[u8] = include_bytes!("../maplibre/styles/maplibre-gl.css");
+
 pub(crate) fn router(state: Arc<AppState>) -> Router {
-    Router::new().fallback(any(dispatch)).with_state(state)
+    Router::new()
+        .fallback(routing::any(dispatch))
+        .with_state(state)
 }
 
 async fn dispatch(
@@ -37,29 +41,21 @@ async fn dispatch(
     }
 
     match path {
-        "/" => response(
-            StatusCode::OK,
-            crate::state::html(),
-            "text/html; charset=utf-8",
-        ),
+        "/" => response(StatusCode::OK, HTML, "text/html; charset=utf-8"),
         "/maplibre-gl.js" => response(
             StatusCode::OK,
-            crate::state::maplibre_js(),
+            MAPLIBRE_JS,
             "application/javascript; charset=utf-8",
         ),
-        "/maplibre-gl.css" => response(
-            StatusCode::OK,
-            crate::state::maplibre_css(),
-            "text/css; charset=utf-8",
-        ),
+        "/maplibre-gl.css" => response(StatusCode::OK, MAPLIBRE_CSS, "text/css; charset=utf-8"),
         "/health" => text_response(StatusCode::OK, "ok\n"),
-        _ if crate::state::fixture(path).is_some() => response(
-            StatusCode::OK,
-            crate::state::fixture(path).unwrap(),
-            "application/vnd.mapbox-vector-tile",
-        ),
-        _ if tile_coordinates(path).is_some() => {
-            let (z, x, y) = tile_coordinates(path).unwrap();
+        _ => {
+            if let Some(bytes) = crate::state::fixture(path) {
+                return response(StatusCode::OK, bytes, "application/vnd.mapbox-vector-tile");
+            }
+            let Some((z, x, y)) = tile_coordinates(path) else {
+                return text_response(StatusCode::NOT_FOUND, "not found\n");
+            };
             match state.compose_tile(z, x, y).await {
                 Ok(tile) => Response::builder()
                     .status(StatusCode::OK)
@@ -70,7 +66,6 @@ async fn dispatch(
                 Err(error) => text_response(StatusCode::BAD_GATEWAY, &format!("{error}\n")),
             }
         }
-        _ => text_response(StatusCode::NOT_FOUND, "not found\n"),
     }
 }
 

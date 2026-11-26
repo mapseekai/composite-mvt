@@ -1,18 +1,37 @@
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
-use buffa::encoding::{Tag, WireType, check_wire_type, decode_varint, skip_field};
-use buffa::types::{borrow_bytes, borrow_str};
-use buffa::{DecodeError, HasMessageView};
+use buffa::DecodeError;
+use buffa::encoding::{self, Tag, WireType};
+use buffa::types;
 use fast_mvt::proto::Value;
 
+use crate::error::{ComposeErrorKind, SourceErrorKind};
 use crate::{ComposeError, MvtSource, SourceError};
 
-#[derive(Clone, Copy)]
+// MVT 2.1 field numbers follow the official Protobuf schema.
+// https://github.com/mapbox/vector-tile-spec/blob/master/2.1/vector_tile.proto
+const TILE_LAYERS: u32 = 3;
+
+const LAYER_NAME: u32 = 1;
+const LAYER_FEATURES: u32 = 2;
+const LAYER_KEYS: u32 = 3;
+const LAYER_VALUES: u32 = 4;
+const LAYER_EXTENT: u32 = 5;
+const LAYER_VERSION: u32 = 15;
+
+const FEATURE_ID: u32 = 1;
+const FEATURE_TAGS: u32 = 2;
+const FEATURE_TYPE: u32 = 3;
+const FEATURE_GEOMETRY: u32 = 4;
+
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum Precedence {
     First,
     Last,
 }
 
+#[derive(Debug)]
 pub(crate) struct LayerFilter {
     pub(crate) precedence: Precedence,
     pub(crate) scan_sources: Box<[bool]>,
@@ -37,9 +56,9 @@ impl LayerFilter {
             while !remaining.is_empty() {
                 let before = remaining;
                 let name = tile_field_name(&mut remaining).map_err(|source| {
-                    ComposeError::SourceParsing {
+                    ComposeErrorKind::SourceParsing {
                         source_id: sources[index].id().clone(),
-                        source,
+                        cause: Box::new(source),
                     }
                 })?;
 
@@ -71,44 +90,46 @@ impl LayerFilter {
 }
 
 fn tile_field_name<'a>(input: &mut &'a [u8]) -> Result<Option<&'a str>, SourceError> {
-    let tag = Tag::decode(input).map_err(|_| SourceError::InvalidMvt)?;
-    if tag.field_number() != 3 {
-        skip_field(tag, input).map_err(|_| SourceError::InvalidMvt)?;
+    let tag = Tag::decode(input).map_err(SourceError::invalid_mvt)?;
+    if tag.field_number() != TILE_LAYERS {
+        encoding::skip_field(tag, input).map_err(SourceError::invalid_mvt)?;
         return Ok(None);
     }
     match message_bytes(tag, input).and_then(layer_name) {
-        Ok("") => Err(SourceError::MissingLayerName),
+        Ok("") => Err(SourceErrorKind::MissingLayerName.into()),
         Ok(name) => Ok(Some(name)),
-        Err(_) => Err(SourceError::InvalidMvt),
+        Err(error) => Err(SourceError::invalid_mvt(error)),
     }
 }
 
 fn message_bytes<'a>(tag: Tag, input: &mut &'a [u8]) -> Result<&'a [u8], DecodeError> {
-    check_wire_type(tag, WireType::LengthDelimited)?;
-    borrow_bytes(input)
+    encoding::check_wire_type(tag, WireType::LengthDelimited)?;
+    types::borrow_bytes(input)
 }
 
 fn layer_name(mut input: &[u8]) -> Result<&str, DecodeError> {
+    use buffa::HasMessageView as _;
+
     let mut name = "";
     while !input.is_empty() {
         let tag = Tag::decode(&mut input)?;
         match tag.field_number() {
-            1 | 3 => {
-                check_wire_type(tag, WireType::LengthDelimited)?;
-                let text = borrow_str(&mut input)?;
-                if tag.field_number() == 1 {
+            LAYER_NAME | LAYER_KEYS => {
+                encoding::check_wire_type(tag, WireType::LengthDelimited)?;
+                let text = types::borrow_str(&mut input)?;
+                if tag.field_number() == LAYER_NAME {
                     name = text;
                 }
             }
-            2 => scan_feature(message_bytes(tag, &mut input)?)?,
-            4 => {
+            LAYER_FEATURES => scan_feature(message_bytes(tag, &mut input)?)?,
+            LAYER_VALUES => {
                 Value::decode_view(message_bytes(tag, &mut input)?)?;
             }
-            5 | 15 => {
-                check_wire_type(tag, WireType::Varint)?;
-                decode_varint(&mut input)?;
+            LAYER_EXTENT | LAYER_VERSION => {
+                encoding::check_wire_type(tag, WireType::Varint)?;
+                encoding::decode_varint(&mut input)?;
             }
-            _ => skip_field(tag, &mut input)?,
+            _ => encoding::skip_field(tag, &mut input)?,
         }
     }
     Ok(name)
@@ -118,17 +139,17 @@ fn scan_feature(mut input: &[u8]) -> Result<(), DecodeError> {
     while !input.is_empty() {
         let tag = Tag::decode(&mut input)?;
         match tag.field_number() {
-            2 | 4 if tag.wire_type() == WireType::LengthDelimited => {
-                let mut packed = borrow_bytes(&mut input)?;
+            FEATURE_TAGS | FEATURE_GEOMETRY if tag.wire_type() == WireType::LengthDelimited => {
+                let mut packed = types::borrow_bytes(&mut input)?;
                 while !packed.is_empty() {
-                    decode_varint(&mut packed)?;
+                    encoding::decode_varint(&mut packed)?;
                 }
             }
-            1..=4 => {
-                check_wire_type(tag, WireType::Varint)?;
-                decode_varint(&mut input)?;
+            FEATURE_ID | FEATURE_TAGS | FEATURE_TYPE | FEATURE_GEOMETRY => {
+                encoding::check_wire_type(tag, WireType::Varint)?;
+                encoding::decode_varint(&mut input)?;
             }
-            _ => skip_field(tag, &mut input)?,
+            _ => encoding::skip_field(tag, &mut input)?,
         }
     }
     Ok(())

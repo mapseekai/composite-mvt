@@ -1,11 +1,13 @@
 #[cfg(feature = "gzip")]
+use fast_mvt::{MvtError, MvtReaderRef, MvtTileBuilder};
+
+#[cfg(feature = "gzip")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use composite_mvt::{Compression, MvtComposer, MvtSource};
-    use fast_mvt::MvtReaderRef;
 
-    let roads = tile_with_layers(&["roads"]);
-    let pipeline = gzip(&tile_with_layers(&["pipeline", "valve"]));
-    let building = tile_with_layers(&["building"]);
+    let roads = tile_with_layers(&["roads"])?;
+    let pipeline = gzip(&tile_with_layers(&["pipeline", "valve"])?)?;
+    let building = tile_with_layers(&["building"])?;
     let composer = MvtComposer::builder()
         .output_compression(Compression::Gzip)
         .add_source(MvtSource::new("roads").with_layers(["roads"]))
@@ -17,7 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_source(MvtSource::new("building").with_layers(["building"]))
         .build()?;
     let output = composer.compose(&[&roads, &pipeline, &building])?;
-    let raw = gunzip(&output);
+    let raw = gunzip(&output)?;
     let layers = MvtReaderRef::new(&raw)?
         .layers()
         .map(|layer| layer.name())
@@ -34,30 +36,28 @@ fn main() {
 }
 
 #[cfg(feature = "gzip")]
-fn tile_with_layers(names: &[&str]) -> Vec<u8> {
-    let mut tile = fast_mvt::MvtTileBuilder::new();
-    for name in names {
-        tile = tile.layer(*name).unwrap().end();
+fn tile_with_layers(names: &[&str]) -> Result<Vec<u8>, MvtError> {
+    let mut tile = MvtTileBuilder::new();
+    for &name in names {
+        tile = tile.layer(name)?.end();
     }
-    tile.encode()
+    Ok(tile.encode())
 }
 
 #[cfg(feature = "gzip")]
-fn gzip(input: &[u8]) -> Vec<u8> {
+fn gzip(input: &[u8]) -> std::io::Result<Vec<u8>> {
     use std::io::Write as _;
 
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    encoder.write_all(input).unwrap();
-    encoder.finish().unwrap()
+    encoder.write_all(input)?;
+    encoder.finish()
 }
 
 #[cfg(feature = "gzip")]
-fn gunzip(input: &[u8]) -> Vec<u8> {
+fn gunzip(input: &[u8]) -> std::io::Result<Vec<u8>> {
     use std::io::Read as _;
 
     let mut output = Vec::new();
-    flate2::read::GzDecoder::new(input)
-        .read_to_end(&mut output)
-        .unwrap();
-    output
+    flate2::read::GzDecoder::new(input).read_to_end(&mut output)?;
+    Ok(output)
 }

@@ -1,6 +1,4 @@
-use composite_mvt::{
-    ComposeError, Compression, DuplicateLayer, MvtComposer, MvtSource, SourceError,
-};
+use composite_mvt::{Compression, DuplicateLayer, MvtComposer, MvtSource, SourceError};
 use fast_mvt::{MvtCoord, MvtGeomType, MvtReaderRef, MvtTileBuilder, MvtValueRef};
 
 const KEEP_POLICIES: [DuplicateLayer; 2] = [DuplicateLayer::KeepFirst, DuplicateLayer::KeepLast];
@@ -205,6 +203,8 @@ fn allow_and_disjoint_sources_keep_opaque_bytes() {
 
 #[test]
 fn scanned_sources_report_malformed_wire_data_with_source_id() {
+    use std::error::Error as _;
+
     let first = layer("shared", 1);
     let invalid: &[&[u8]] = &[
         b"\x00",
@@ -224,21 +224,21 @@ fn scanned_sources_report_malformed_wire_data_with_source_id() {
     for policy in KEEP_POLICIES {
         let composer = builder(policy).build().unwrap();
         for &raw in invalid {
-            assert!(
-                matches!(
-                    composer.compose(&[first.as_slice(), raw]),
-                    Err(ComposeError::SourceParsing { source_id, source: SourceError::InvalidMvt })
-                        if source_id.as_ref() == "b"
-                ),
-                "{raw:?}"
-            );
+            let error = composer.compose(&[first.as_slice(), raw]).unwrap_err();
+            assert!(error.is_source_parsing(), "{raw:?}");
+            assert_eq!(error.source_id().map(AsRef::as_ref), Some("b"));
+            let source = error.source_error().unwrap();
+            assert!(source.is_invalid_mvt(), "{raw:?}");
+            assert!(error.source().unwrap().is::<SourceError>());
+            assert!(source.source().unwrap().is::<buffa::DecodeError>());
         }
         for raw in [b"\x1a\x00", b"\x1a\x02\x0a\x00".as_slice()] {
-            assert!(matches!(
-                composer.compose_with_encodings(&[(raw, Compression::None), (b"", Compression::Other)]),
-                Err(ComposeError::SourceParsing { source_id, source: SourceError::MissingLayerName })
-                    if source_id.as_ref() == "a"
-            ));
+            let error = composer
+                .compose_with_encodings(&[(raw, Compression::None), (b"", Compression::Other)])
+                .unwrap_err();
+            assert!(error.is_source_parsing());
+            assert_eq!(error.source_id().map(AsRef::as_ref), Some("a"));
+            assert!(error.source_error().unwrap().is_missing_layer_name());
         }
     }
 }
@@ -285,9 +285,9 @@ fn checks_the_decoded_budget_before_discarding_layers() {
             composer.compose(&[&first, &encode(b"")]).unwrap(),
             encode(&first)
         );
-        assert!(matches!(
-            builder(first.len() + last.len() - 1).compose_with_encodings(&inputs),
-            Err(ComposeError::SizeOverflow)
-        ));
+        let error = builder(first.len() + last.len() - 1)
+            .compose_with_encodings(&inputs)
+            .unwrap_err();
+        assert!(error.is_size_overflow());
     }
 }

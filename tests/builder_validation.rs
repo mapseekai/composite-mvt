@@ -4,22 +4,30 @@ fn source(id: &str, layers: &[&str]) -> MvtSource {
     MvtSource::new(id).with_layers(layers.iter().copied())
 }
 
+#[track_caller]
+fn assert_duplicate_layer(error: &BuildError, expected: (&str, &str, &str)) {
+    let (layer, first, second) = error
+        .duplicate_layer_name()
+        .expect("expected a duplicate layer");
+    assert_eq!((layer.as_ref(), first.as_ref(), second.as_ref()), expected);
+}
+
 #[test]
 fn rejects_no_sources_and_duplicate_ids() {
-    assert!(matches!(
-        MvtComposer::builder().build(),
-        Err(BuildError::NoSources)
-    ));
+    let builder = MvtComposer::builder();
+    let _: &dyn std::fmt::Debug = &builder;
+    let error = builder.build().unwrap_err();
+    let _: &(dyn std::error::Error + Send + Sync) = &error;
+    let _: &std::backtrace::Backtrace = error.backtrace();
+    assert!(error.is_no_sources());
 
-    let result = MvtComposer::builder()
+    let error = MvtComposer::builder()
         .add_source(source("roads", &["roads"]))
         .add_source(source("roads", &["labels"]))
-        .build();
-
-    let Err(BuildError::DuplicateSourceId { id }) = result else {
-        panic!("expected duplicate source ID");
-    };
-    assert_eq!(id.as_ref(), "roads");
+        .build()
+        .unwrap_err();
+    assert!(error.is_duplicate_source_id());
+    assert_eq!(error.source_id().map(AsRef::as_ref), Some("roads"));
 }
 
 #[test]
@@ -33,17 +41,7 @@ fn explicit_duplicate_validation_matches_build() {
         builder.validate_duplicate_layers(),
         builder.build().map(drop),
     ] {
-        let Err(BuildError::DuplicateLayerName {
-            layer,
-            first_source,
-            second_source,
-        }) = result
-        else {
-            panic!("expected a cross-source duplicate layer");
-        };
-        assert_eq!(layer.as_ref(), "shared");
-        assert_eq!(first_source.as_ref(), "a");
-        assert_eq!(second_source.as_ref(), "b");
+        assert_duplicate_layer(&result.unwrap_err(), ("shared", "a", "b"));
     }
 }
 
@@ -68,18 +66,17 @@ fn allows_cross_source_duplicates_when_configured() {
 
 #[test]
 fn rejects_missing_and_empty_layers() {
-    assert!(matches!(
-        MvtComposer::builder()
-            .add_source(MvtSource::new("empty"))
-            .build(),
-        Err(BuildError::NoLayers { .. })
-    ));
-    assert!(matches!(
-        MvtComposer::builder()
-            .add_source(source("empty", &[""]))
-            .build(),
-        Err(BuildError::EmptyLayerName { .. })
-    ));
+    let no_layers = MvtComposer::builder()
+        .add_source(MvtSource::new("empty"))
+        .build()
+        .unwrap_err();
+    assert!(no_layers.is_no_layers());
+
+    let empty_name = MvtComposer::builder()
+        .add_source(source("empty", &[""]))
+        .build()
+        .unwrap_err();
+    assert!(empty_name.is_empty_layer_name());
 }
 
 #[test]
@@ -98,11 +95,7 @@ fn same_source_duplicates_are_always_invalid() {
             builder.validate_duplicate_layers(),
             builder.build().map(drop),
         ] {
-            assert!(matches!(
-                result,
-                Err(BuildError::DuplicateLayerName { layer, first_source, second_source })
-                    if layer.as_ref() == "roads" && first_source.as_ref() == "roads" && second_source.as_ref() == "roads"
-            ));
+            assert_duplicate_layer(&result.unwrap_err(), ("roads", "roads", "roads"));
         }
     }
 }
@@ -115,13 +108,11 @@ fn duplicate_source_ids_precede_per_source_errors() {
         .add_source(MvtSource::new("same"));
 
     // When: the complete builder is validated.
-    let result = builder.build();
+    let error = builder.build().unwrap_err();
 
     // Then: the global source-ID pass wins over source-local errors.
-    assert!(matches!(
-        result,
-        Err(BuildError::DuplicateSourceId { id }) if id.as_ref() == "same"
-    ));
+    assert!(error.is_duplicate_source_id());
+    assert_eq!(error.source_id().map(AsRef::as_ref), Some("same"));
 }
 
 #[test]
@@ -132,13 +123,11 @@ fn missing_layers_across_all_sources_precede_earlier_empty_names() {
         .add_source(MvtSource::new("later"));
 
     // When: the complete builder is validated.
-    let result = builder.build();
+    let error = builder.build().unwrap_err();
 
     // Then: the all-sources no-layer pass completes before empty names are checked.
-    assert!(matches!(
-        result,
-        Err(BuildError::NoLayers { source_id }) if source_id.as_ref() == "later"
-    ));
+    assert!(error.is_no_layers());
+    assert_eq!(error.source_id().map(AsRef::as_ref), Some("later"));
 }
 
 #[test]
@@ -149,20 +138,10 @@ fn duplicate_layers_precede_unsupported_source_compression() {
         .add_source(source("second", &["shared"]).with_compression(Compression::Other));
 
     // When: the complete builder is validated.
-    let result = builder.build();
+    let error = builder.build().unwrap_err();
 
     // Then: duplicate validation runs before source compression validation.
-    let Err(BuildError::DuplicateLayerName {
-        layer,
-        first_source,
-        second_source,
-    }) = result
-    else {
-        panic!("expected duplicate layer precedence");
-    };
-    assert_eq!(layer.as_ref(), "shared");
-    assert_eq!(first_source.as_ref(), "first");
-    assert_eq!(second_source.as_ref(), "second");
+    assert_duplicate_layer(&error, ("shared", "first", "second"));
 }
 
 #[cfg(not(feature = "zstd"))]
@@ -174,54 +153,48 @@ fn duplicate_layers_precede_disabled_source_compression() {
         .add_source(source("second", &["shared"]).with_compression(Compression::Zstd));
 
     // When: the complete builder is validated.
-    let result = builder.build();
+    let error = builder.build().unwrap_err();
 
     // Then: duplicate validation runs before feature validation.
-    assert!(matches!(
-        result,
-        Err(BuildError::DuplicateLayerName {
-            layer,
-            first_source,
-            second_source,
-        }) if layer.as_ref() == "shared"
-            && first_source.as_ref() == "first"
-            && second_source.as_ref() == "second"
-    ));
+    assert_duplicate_layer(&error, ("shared", "first", "second"));
 }
 
 #[test]
 fn rejects_other_for_input_and_output() {
-    assert!(matches!(
-        MvtComposer::builder()
-            .add_source(source("roads", &["roads"]).with_compression(Compression::Other))
-            .build(),
-        Err(BuildError::UnsupportedCompression { .. })
-    ));
-    assert!(matches!(
-        MvtComposer::builder()
-            .output_compression(Compression::Other)
-            .add_source(source("roads", &["roads"]))
-            .build(),
-        Err(BuildError::UnsupportedOutputCompression { .. })
-    ));
+    let input = MvtComposer::builder()
+        .add_source(source("roads", &["roads"]).with_compression(Compression::Other))
+        .build()
+        .unwrap_err();
+    assert!(input.is_unsupported_compression());
+    assert_eq!(input.source_id().map(AsRef::as_ref), Some("roads"));
+    assert_eq!(input.compression(), Some(Compression::Other));
+
+    let output = MvtComposer::builder()
+        .output_compression(Compression::Other)
+        .add_source(source("roads", &["roads"]))
+        .build()
+        .unwrap_err();
+    assert!(output.is_unsupported_output_compression());
+    assert_eq!(output.compression(), Some(Compression::Other));
 }
 
 #[cfg(not(feature = "zstd"))]
 #[test]
 fn rejects_disabled_input_and_output_features() {
-    assert!(matches!(
-        MvtComposer::builder()
-            .add_source(source("roads", &["roads"]).with_compression(Compression::Zstd))
-            .build(),
-        Err(BuildError::CompressionFeatureDisabled { .. })
-    ));
-    assert!(matches!(
-        MvtComposer::builder()
-            .output_compression(Compression::Zstd)
-            .add_source(source("roads", &["roads"]))
-            .build(),
-        Err(BuildError::OutputCompressionFeatureDisabled { .. })
-    ));
+    let input = MvtComposer::builder()
+        .add_source(source("roads", &["roads"]).with_compression(Compression::Zstd))
+        .build()
+        .unwrap_err();
+    assert!(input.is_compression_feature_disabled());
+    assert_eq!(input.compression(), Some(Compression::Zstd));
+
+    let output = MvtComposer::builder()
+        .output_compression(Compression::Zstd)
+        .add_source(source("roads", &["roads"]))
+        .build()
+        .unwrap_err();
+    assert!(output.is_output_compression_feature_disabled());
+    assert_eq!(output.compression(), Some(Compression::Zstd));
 }
 
 #[test]

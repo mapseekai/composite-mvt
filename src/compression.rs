@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use bytes::Bytes;
 
-use crate::error::BoxError;
+use crate::error::{BoxError, SourceErrorKind};
 use crate::{Compression, SourceError};
 
 pub(crate) fn detect_compression(input: &[u8]) -> Compression {
@@ -67,9 +67,11 @@ pub(crate) fn decompress_limited(
         Compression::None => Cow::Borrowed(input),
         Compression::Gzip => Cow::Owned(decompress_gzip(input, max)?),
         Compression::Zstd => Cow::Owned(decompress_zstd(input, max)?),
-        Compression::Brotli => Cow::Owned(decompress_brotli(input, max)?),
+        Compression::Brotli => return decompress_brotli(input, max).map(Cow::Owned),
         Compression::Other => {
-            return Err(SourceError::UnsupportedCompression { compression }.into());
+            return Err(DecodeError::Source(
+                SourceErrorKind::UnsupportedCompression { compression }.into(),
+            ));
         }
     };
     if output.len() > max {
@@ -80,12 +82,13 @@ pub(crate) fn decompress_limited(
 
 fn decode_failure(
     compression: Compression,
-    source: impl std::error::Error + Send + Sync + 'static,
+    cause: impl std::error::Error + Send + Sync + 'static,
 ) -> SourceError {
-    SourceError::DecompressionFailed {
+    SourceErrorKind::DecompressionFailed {
         compression,
-        source: Box::new(source),
+        cause: Box::new(cause),
     }
+    .into()
 }
 
 #[cfg(any(feature = "gzip", feature = "zstd"))]
@@ -116,9 +119,10 @@ fn decompress_gzip(input: &[u8], max: usize) -> Result<Vec<u8>, SourceError> {
 
 #[cfg(not(feature = "gzip"))]
 fn decompress_gzip(_: &[u8], _: usize) -> Result<Vec<u8>, SourceError> {
-    Err(SourceError::CompressionFeatureDisabled {
+    Err(SourceErrorKind::CompressionFeatureDisabled {
         compression: Compression::Gzip,
-    })
+    }
+    .into())
 }
 
 #[cfg(feature = "zstd")]
@@ -130,9 +134,10 @@ fn decompress_zstd(input: &[u8], max: usize) -> Result<Vec<u8>, SourceError> {
 
 #[cfg(not(feature = "zstd"))]
 fn decompress_zstd(_: &[u8], _: usize) -> Result<Vec<u8>, SourceError> {
-    Err(SourceError::CompressionFeatureDisabled {
+    Err(SourceErrorKind::CompressionFeatureDisabled {
         compression: Compression::Zstd,
-    })
+    }
+    .into())
 }
 
 #[cfg(feature = "brotli")]
@@ -178,22 +183,61 @@ fn decompress_brotli(input: &[u8], max: usize) -> Result<Vec<u8>, DecodeError> {
 
 #[cfg(not(feature = "brotli"))]
 fn decompress_brotli(_: &[u8], _: usize) -> Result<Vec<u8>, DecodeError> {
-    Err(SourceError::CompressionFeatureDisabled {
-        compression: Compression::Brotli,
-    }
-    .into())
+    Err(DecodeError::Source(
+        SourceErrorKind::CompressionFeatureDisabled {
+            compression: Compression::Brotli,
+        }
+        .into(),
+    ))
 }
 
-pub(crate) fn compress(compression: Compression, input: &[u8]) -> Result<Bytes, BoxError> {
-    match compression {
-        Compression::None => Ok(Bytes::copy_from_slice(input)),
-        Compression::Gzip => compress_gzip(input).map(Bytes::from),
-        Compression::Zstd => compress_zstd(input).map(Bytes::from),
-        Compression::Brotli => compress_brotli(input).map(Bytes::from),
-        Compression::Other => Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "unsupported output compression",
-        ))),
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum OutputCompression {
+    Raw,
+    #[cfg(feature = "gzip")]
+    Gzip,
+    #[cfg(feature = "zstd")]
+    Zstd,
+    #[cfg(feature = "brotli")]
+    Brotli,
+}
+
+impl OutputCompression {
+    pub(crate) fn from_compression(compression: Compression) -> Option<Self> {
+        match compression {
+            Compression::None => Some(Self::Raw),
+            #[cfg(feature = "gzip")]
+            Compression::Gzip => Some(Self::Gzip),
+            #[cfg(feature = "zstd")]
+            Compression::Zstd => Some(Self::Zstd),
+            #[cfg(feature = "brotli")]
+            Compression::Brotli => Some(Self::Brotli),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn compression(self) -> Compression {
+        match self {
+            Self::Raw => Compression::None,
+            #[cfg(feature = "gzip")]
+            Self::Gzip => Compression::Gzip,
+            #[cfg(feature = "zstd")]
+            Self::Zstd => Compression::Zstd,
+            #[cfg(feature = "brotli")]
+            Self::Brotli => Compression::Brotli,
+        }
+    }
+
+    pub(crate) fn encode(self, input: Vec<u8>) -> Result<Bytes, BoxError> {
+        match self {
+            Self::Raw => Ok(Bytes::from(input)),
+            #[cfg(feature = "gzip")]
+            Self::Gzip => compress_gzip(&input).map(Bytes::from),
+            #[cfg(feature = "zstd")]
+            Self::Zstd => compress_zstd(&input).map(Bytes::from),
+            #[cfg(feature = "brotli")]
+            Self::Brotli => compress_brotli(&input).map(Bytes::from),
+        }
     }
 }
 
@@ -206,25 +250,9 @@ fn compress_gzip(input: &[u8]) -> Result<Vec<u8>, BoxError> {
     Ok(encoder.finish()?)
 }
 
-#[cfg(not(feature = "gzip"))]
-fn compress_gzip(_: &[u8]) -> Result<Vec<u8>, BoxError> {
-    Err(Box::new(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "gzip feature is disabled",
-    )))
-}
-
 #[cfg(feature = "zstd")]
 fn compress_zstd(input: &[u8]) -> Result<Vec<u8>, BoxError> {
     Ok(zstd::stream::encode_all(input, 0)?)
-}
-
-#[cfg(not(feature = "zstd"))]
-fn compress_zstd(_: &[u8]) -> Result<Vec<u8>, BoxError> {
-    Err(Box::new(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "zstd feature is disabled",
-    )))
 }
 
 #[cfg(feature = "brotli")]
@@ -235,22 +263,11 @@ fn compress_brotli(input: &[u8]) -> Result<Vec<u8>, BoxError> {
     Ok(output)
 }
 
-#[cfg(not(feature = "brotli"))]
-fn compress_brotli(_: &[u8]) -> Result<Vec<u8>, BoxError> {
-    Err(Box::new(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "brotli feature is disabled",
-    )))
-}
-
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
 
     use super::*;
-    #[cfg(any(not(feature = "gzip"), not(feature = "zstd"), not(feature = "brotli")))]
-    use crate::error::BoxError;
-    use crate::{Compression, SourceError};
 
     #[cfg(any(feature = "gzip", feature = "zstd"))]
     #[test]
@@ -318,89 +335,66 @@ mod tests {
     }
 
     #[test]
-    fn none_compression_copies_input_into_bytes() {
-        assert_eq!(
-            compress(Compression::None, b"raw").unwrap().as_ref(),
-            b"raw"
-        );
+    fn raw_output_takes_ownership_of_the_input() {
+        let input = b"raw".to_vec();
+        let allocation = input.as_ptr();
+        let output = OutputCompression::Raw.encode(input).unwrap();
+        assert_eq!(output.as_ref(), b"raw");
+        assert_eq!(output.as_ptr(), allocation);
     }
 
     #[test]
     fn other_decompression_returns_typed_unsupported_error() {
-        assert!(matches!(
-            decompress(Compression::Other, b"raw"),
-            Err(SourceError::UnsupportedCompression {
-                compression: Compression::Other
-            })
-        ));
+        let error = decompress(Compression::Other, b"raw").unwrap_err();
+        assert!(error.is_unsupported_compression());
+        assert_eq!(error.compression(), Some(Compression::Other));
     }
 
     #[test]
-    fn other_compression_returns_unsupported_io_error() {
-        let error = compress(Compression::Other, b"raw").unwrap_err();
-        assert_eq!(
-            error
-                .downcast_ref::<std::io::Error>()
-                .map(std::io::Error::kind),
-            Some(std::io::ErrorKind::Unsupported)
-        );
+    fn only_enabled_encodings_can_be_selected_for_output() {
+        for compression in [
+            Compression::None,
+            Compression::Gzip,
+            Compression::Zstd,
+            Compression::Brotli,
+            Compression::Other,
+        ] {
+            assert_eq!(
+                OutputCompression::from_compression(compression)
+                    .map(OutputCompression::compression),
+                feature_enabled(compression).then_some(compression)
+            );
+        }
     }
 
     #[cfg(not(feature = "gzip"))]
     #[test]
     fn disabled_gzip_decompression_returns_typed_error() {
-        assert!(matches!(
-            decompress(Compression::Gzip, b"raw"),
-            Err(SourceError::CompressionFeatureDisabled {
-                compression: Compression::Gzip
-            })
-        ));
+        let error = decompress(Compression::Gzip, b"raw").unwrap_err();
+        assert!(error.is_compression_feature_disabled());
+        assert_eq!(error.compression(), Some(Compression::Gzip));
     }
 
     #[cfg(not(feature = "zstd"))]
     #[test]
     fn disabled_zstd_decompression_returns_typed_error() {
-        assert!(matches!(
-            decompress(Compression::Zstd, b"raw"),
-            Err(SourceError::CompressionFeatureDisabled {
-                compression: Compression::Zstd
-            })
-        ));
+        let error = decompress(Compression::Zstd, b"raw").unwrap_err();
+        assert!(error.is_compression_feature_disabled());
+        assert_eq!(error.compression(), Some(Compression::Zstd));
     }
 
     #[cfg(not(feature = "brotli"))]
     #[test]
     fn disabled_brotli_decompression_returns_typed_error() {
-        assert!(matches!(
-            decompress(Compression::Brotli, b"raw"),
-            Err(SourceError::CompressionFeatureDisabled {
-                compression: Compression::Brotli
-            })
-        ));
-    }
-
-    #[cfg(not(feature = "gzip"))]
-    #[test]
-    fn disabled_gzip_compression_returns_unsupported_io_error() {
-        assert_unsupported(compress(Compression::Gzip, b"raw"));
-    }
-
-    #[cfg(not(feature = "zstd"))]
-    #[test]
-    fn disabled_zstd_compression_returns_unsupported_io_error() {
-        assert_unsupported(compress(Compression::Zstd, b"raw"));
-    }
-
-    #[cfg(not(feature = "brotli"))]
-    #[test]
-    fn disabled_brotli_compression_returns_unsupported_io_error() {
-        assert_unsupported(compress(Compression::Brotli, b"raw"));
+        let error = decompress(Compression::Brotli, b"raw").unwrap_err();
+        assert!(error.is_compression_feature_disabled());
+        assert_eq!(error.compression(), Some(Compression::Brotli));
     }
 
     #[cfg(feature = "gzip")]
     #[test]
     fn gzip_round_trip() {
-        let encoded = compress(Compression::Gzip, b"tile").unwrap();
+        let encoded = OutputCompression::Gzip.encode(b"tile".to_vec()).unwrap();
         assert!(encoded.starts_with(&[0x1f, 0x8b]));
         assert_eq!(
             decompress(Compression::Gzip, &encoded).unwrap().as_ref(),
@@ -411,7 +405,7 @@ mod tests {
     #[cfg(feature = "zstd")]
     #[test]
     fn zstd_round_trip() {
-        let encoded = compress(Compression::Zstd, b"tile").unwrap();
+        let encoded = OutputCompression::Zstd.encode(b"tile".to_vec()).unwrap();
         assert!(encoded.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]));
         assert_eq!(
             decompress(Compression::Zstd, &encoded).unwrap().as_ref(),
@@ -422,7 +416,7 @@ mod tests {
     #[cfg(feature = "brotli")]
     #[test]
     fn brotli_round_trip() {
-        let encoded = compress(Compression::Brotli, b"tile").unwrap();
+        let encoded = OutputCompression::Brotli.encode(b"tile".to_vec()).unwrap();
         assert_eq!(
             decompress(Compression::Brotli, &encoded).unwrap().as_ref(),
             b"tile"
@@ -432,47 +426,24 @@ mod tests {
     #[cfg(feature = "gzip")]
     #[test]
     fn invalid_gzip_input_returns_decompression_error() {
-        assert!(matches!(
-            decompress(Compression::Gzip, b"raw"),
-            Err(SourceError::DecompressionFailed {
-                compression: Compression::Gzip,
-                ..
-            })
-        ));
+        let error = decompress(Compression::Gzip, b"raw").unwrap_err();
+        assert!(error.is_decompression_failed());
+        assert_eq!(error.compression(), Some(Compression::Gzip));
     }
 
     #[cfg(feature = "zstd")]
     #[test]
     fn invalid_zstd_input_returns_decompression_error() {
-        assert!(matches!(
-            decompress(Compression::Zstd, b"raw"),
-            Err(SourceError::DecompressionFailed {
-                compression: Compression::Zstd,
-                ..
-            })
-        ));
+        let error = decompress(Compression::Zstd, b"raw").unwrap_err();
+        assert!(error.is_decompression_failed());
+        assert_eq!(error.compression(), Some(Compression::Zstd));
     }
 
     #[cfg(feature = "brotli")]
     #[test]
     fn invalid_brotli_input_returns_decompression_error() {
-        assert!(matches!(
-            decompress(Compression::Brotli, b"raw"),
-            Err(SourceError::DecompressionFailed {
-                compression: Compression::Brotli,
-                ..
-            })
-        ));
-    }
-
-    #[cfg(any(not(feature = "gzip"), not(feature = "zstd"), not(feature = "brotli")))]
-    fn assert_unsupported(result: Result<bytes::Bytes, BoxError>) {
-        let error = result.unwrap_err();
-        assert_eq!(
-            error
-                .downcast_ref::<std::io::Error>()
-                .map(std::io::Error::kind),
-            Some(std::io::ErrorKind::Unsupported)
-        );
+        let error = decompress(Compression::Brotli, b"raw").unwrap_err();
+        assert!(error.is_decompression_failed());
+        assert_eq!(error.compression(), Some(Compression::Brotli));
     }
 }

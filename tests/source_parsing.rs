@@ -1,7 +1,9 @@
 mod common;
 
+use std::error::Error;
+
 use common::tile_with_layers;
-use composite_mvt::{BuildError, Compression, DuplicateLayer, MvtComposer, MvtSource, SourceError};
+use composite_mvt::{Compression, DuplicateLayer, MvtComposer, MvtSource};
 
 const TILE_WITHOUT_LAYERS: &[u8] = &[0x08, 0x00];
 const TILE_WITH_EMPTY_LAYER_NAME: &[u8] = &[0x1a, 0x04, 0x0a, 0x00, 0x78, 0x02];
@@ -41,22 +43,18 @@ fn unions_multiple_samples_in_first_seen_order() {
 
 #[test]
 fn rejects_empty_input_and_empty_sample_set() {
-    assert!(matches!(
+    for result in [
         MvtSource::from_mvt("empty", &[]),
-        Err(SourceError::EmptyBytes)
-    ));
-    assert!(matches!(
         MvtSource::from_mvt_with_compression("empty", &[], Compression::Brotli),
-        Err(SourceError::EmptyBytes)
-    ));
-    assert!(matches!(
         MvtSource::from_mvts_with_compression("empty", [b""], Compression::Gzip),
-        Err(SourceError::EmptyBytes)
-    ));
-    assert!(matches!(
-        MvtSource::from_mvts::<Vec<&[u8]>, &[u8]>("empty", Vec::new()),
-        Err(SourceError::NoSamples)
-    ));
+    ] {
+        assert!(result.unwrap_err().is_empty_bytes());
+    }
+    assert!(
+        MvtSource::from_mvts::<Vec<&[u8]>, &[u8]>("empty", Vec::new())
+            .unwrap_err()
+            .is_no_samples()
+    );
 }
 
 #[test]
@@ -66,7 +64,7 @@ fn rejects_a_nonempty_tile_without_layers() {
     let result = MvtSource::from_mvt("empty", TILE_WITHOUT_LAYERS);
 
     // Then: the source reports a zero-layer tile, not empty input.
-    assert!(matches!(result, Err(SourceError::NoLayers)));
+    assert!(result.unwrap_err().is_no_layers());
 }
 
 #[test]
@@ -76,7 +74,7 @@ fn maps_an_explicit_empty_layer_name_to_missing_layer_name() {
     let result = MvtSource::from_mvt("empty-name", TILE_WITH_EMPTY_LAYER_NAME);
 
     // Then: fast-mvt's single missing-or-empty name contract is preserved.
-    assert!(matches!(result, Err(SourceError::MissingLayerName)));
+    assert!(result.unwrap_err().is_missing_layer_name());
 }
 
 #[test]
@@ -114,20 +112,16 @@ fn multi_sample_parsing_preserves_duplicates_declared_inside_one_sample() {
         ["roads", "roads", "buildings"]
     );
 
-    let result = MvtComposer::builder()
+    let error = MvtComposer::builder()
         .duplicate_layer(DuplicateLayer::Allow)
         .add_source(source)
-        .build();
-    assert!(matches!(
-        result,
-        Err(BuildError::DuplicateLayerName {
-            layer,
-            first_source,
-            second_source,
-        }) if layer.as_ref() == "roads"
-            && first_source.as_ref() == "mixed"
-            && second_source.as_ref() == "mixed"
-    ));
+        .build()
+        .unwrap_err();
+    let (layer, first, second) = error.duplicate_layer_name().unwrap();
+    assert_eq!(
+        (layer.as_ref(), first.as_ref(), second.as_ref()),
+        ("roads", "mixed", "mixed")
+    );
 }
 
 #[test]
@@ -159,57 +153,51 @@ fn explicit_raw_compression_does_not_follow_gzip_magic() {
     let result = MvtSource::from_mvt_with_compression("roads", &encoded, Compression::None);
 
     // Then: the explicit setting wins and the compressed bytes are invalid raw MVT.
-    assert!(matches!(result, Err(SourceError::InvalidMvt)));
+    assert!(result.unwrap_err().is_invalid_mvt());
 }
 
 #[cfg(not(feature = "gzip"))]
 #[test]
 fn public_auto_constructor_reports_disabled_gzip() {
-    assert!(matches!(
-        MvtSource::from_mvt("gzip", &[0x1f, 0x8b, 0x08]),
-        Err(SourceError::CompressionFeatureDisabled {
-            compression: Compression::Gzip
-        })
-    ));
+    let error = MvtSource::from_mvt("gzip", &[0x1f, 0x8b, 0x08]).unwrap_err();
+    assert!(error.is_compression_feature_disabled());
+    assert_eq!(error.compression(), Some(Compression::Gzip));
 }
 
 #[cfg(not(feature = "zstd"))]
 #[test]
 fn public_auto_constructor_reports_disabled_zstd() {
-    assert!(matches!(
-        MvtSource::from_mvt("zstd", &[0x28, 0xb5, 0x2f, 0xfd]),
-        Err(SourceError::CompressionFeatureDisabled {
-            compression: Compression::Zstd
-        })
-    ));
+    let error = MvtSource::from_mvt("zstd", &[0x28, 0xb5, 0x2f, 0xfd]).unwrap_err();
+    assert!(error.is_compression_feature_disabled());
+    assert_eq!(error.compression(), Some(Compression::Zstd));
 }
 
 #[cfg(not(feature = "brotli"))]
 #[test]
 fn public_explicit_constructor_reports_disabled_brotli() {
-    assert!(matches!(
-        MvtSource::from_mvt_with_compression("brotli", b"encoded", Compression::Brotli,),
-        Err(SourceError::CompressionFeatureDisabled {
-            compression: Compression::Brotli
-        })
-    ));
+    let error = MvtSource::from_mvt_with_compression("brotli", b"encoded", Compression::Brotli)
+        .unwrap_err();
+    assert!(error.is_compression_feature_disabled());
+    assert_eq!(error.compression(), Some(Compression::Brotli));
 }
 
 #[test]
 fn rejects_invalid_mvt_and_inconsistent_sample_compression() {
-    assert!(matches!(
-        MvtSource::from_mvt("invalid", b"not-an-mvt"),
-        Err(SourceError::InvalidMvt)
-    ));
+    let error = MvtSource::from_mvt("invalid", b"not-an-mvt").unwrap_err();
+    let _: &(dyn Error + Send + Sync) = &error;
+    let _: &std::backtrace::Backtrace = error.backtrace();
+    assert!(error.is_invalid_mvt());
+    assert!(error.source().unwrap().is::<fast_mvt::MvtError>());
 
     #[cfg(feature = "gzip")]
     {
         let raw = tile_with_layers(&["roads"]);
         let encoded = common::gzip(&raw);
-        assert!(matches!(
-            MvtSource::from_mvts("roads", [&raw, &encoded]),
-            Err(SourceError::InconsistentSampleCompression { .. })
-        ));
+        let mismatch = MvtSource::from_mvts("roads", [&raw, &encoded]).unwrap_err();
+        assert_eq!(
+            mismatch.inconsistent_sample_compression(),
+            Some((Compression::None, Compression::Gzip))
+        );
     }
 }
 

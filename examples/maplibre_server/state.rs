@@ -2,8 +2,9 @@ use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use composite_mvt::{Compression, MvtComposer, MvtSource};
-use futures_util::future::try_join_all;
+use futures_util::future;
 use tokio::sync::RwLock;
 
 #[cfg(test)]
@@ -113,7 +114,7 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) async fn compose_tile(&self, z: &str, x: &str, y: &str) -> Result<Vec<u8>, String> {
+    pub(crate) async fn compose_tile(&self, z: &str, x: &str, y: &str) -> Result<Bytes, String> {
         let configured = self
             .configured
             .read()
@@ -128,26 +129,12 @@ impl AppState {
                 .replace("{y}", y);
             fetch_http(&self.client, url, source.gzip)
         });
-        let inputs = try_join_all(requests).await?;
-        let borrowed = inputs.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let inputs = future::try_join_all(requests).await?;
         configured
             .composer
-            .compose(&borrowed)
-            .map(|tile| tile.to_vec())
+            .compose(&inputs)
             .map_err(|error| error.to_string())
     }
-}
-
-pub(crate) fn html() -> &'static [u8] {
-    include_bytes!("../maplibre/index.html")
-}
-
-pub(crate) fn maplibre_js() -> &'static [u8] {
-    include_bytes!("../maplibre/maplibre-gl.js")
-}
-
-pub(crate) fn maplibre_css() -> &'static [u8] {
-    include_bytes!("../maplibre/styles/maplibre-gl.css")
 }
 
 pub(crate) fn fixture(path: &str) -> Option<&'static [u8]> {
@@ -292,7 +279,7 @@ pub(crate) async fn run_from_environment() -> Result<(), Box<dyn Error + Send + 
     Ok(())
 }
 
-async fn fetch_http(client: &reqwest::Client, url: String, gzip: bool) -> Result<Vec<u8>, String> {
+async fn fetch_http(client: &reqwest::Client, url: String, gzip: bool) -> Result<Bytes, String> {
     let accept_encoding = if gzip { "gzip" } else { "identity" };
     let response = client
         .get(&url)
@@ -305,6 +292,5 @@ async fn fetch_http(client: &reqwest::Client, url: String, gzip: bool) -> Result
     response
         .bytes()
         .await
-        .map(|bytes| bytes.to_vec())
         .map_err(|error| format!("failed to read {url}: {error}"))
 }

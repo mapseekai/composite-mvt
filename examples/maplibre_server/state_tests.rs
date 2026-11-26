@@ -1,4 +1,7 @@
-use super::*;
+use std::sync::Arc;
+use std::time::Duration;
+
+use super::AppState;
 
 #[tokio::test]
 async fn configuration_updates_do_not_wait_for_in_flight_tiles() {
@@ -48,7 +51,7 @@ async fn configuration_updates_do_not_wait_for_in_flight_tiles() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(new_tile, b"new tile");
+    assert_eq!(new_tile.as_ref(), b"new tile");
 
     release.notify_one();
     let old_tile = tokio::time::timeout(Duration::from_secs(2), old_request)
@@ -56,6 +59,6 @@ async fn configuration_updates_do_not_wait_for_in_flight_tiles() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(old_tile, b"old tile");
+    assert_eq!(old_tile.as_ref(), b"old tile");
     server.abort();
 }
