@@ -14,6 +14,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Include the source repository in the crate metadata.
 - Serve the bundled MapLibre GL JS license and show data attribution for the OpenFreeMap sources.
 - Update the MapLibre example's HTTP/2 and TLS dependencies to patched versions.
+- Update Zstandard and the MapLibre example's locked networking dependencies to patched versions.
 
 ## [0.3.0] - 2026-11-22
 

@@ -29,7 +29,7 @@ bytes = "1"
 thiserror = "2"
 fast-mvt = { version = "=0.7.2", default-features = false, features = ["reader"] }
 flate2 = { version = "1.1.9", optional = true }
-zstd = { version = "0.13.3", optional = true }
+zstd = { version = "0.13.4", optional = true }
 brotli = { version = "8.0.4", optional = true }
 
 [dev-dependencies]
