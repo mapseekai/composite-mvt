@@ -1,0 +1,12 @@
+# Automated review
+
+The hosted workflows run public-repository checks; they do not contain private governance documents or credentials.
+
+- PR Review runs on opened, synchronized, reopened and ready-for-review pull requests. All PRs run deterministic checks. Non-draft same-repository PRs run a read-only hosted preliminary AI review after checks. Fork PRs never receive the API key and require a separate authorized review when AI evidence is needed.
+- Release Review is a manual candidate check and a reusable workflow called by Publish. It never publishes. The candidate must be an exact commit SHA.
+- Publish runs Release Review before requesting crates.io OIDC credentials or creating a GitHub Release. The publish job checks out the reviewed SHA, verifies the package version, and confirms the remote tag still resolves to that SHA before requesting credentials. It preserves the existing trusted publishing workflow identity.
+- Configure repository Actions secret OPENAI_API_KEY and, if needed, repository variable CODEX_REVIEW_MODEL with an API-supported model identifier. The default is gpt-6.2-astra; account/API availability must be verified. The configured effort is max.
+- AI results are JSON artifacts keyed by candidate SHA. The gate requires a single valid result with a `pass` verdict, the exact candidate SHA, and a nonblank report. Missing credentials stop the AI review. The hosted preliminary AI gate is not the complete independent multi-agent review or proof of Notion/Linear synchronization. Authorized project coordinators must import and verify the artifact against the current engineering standards and record governance results separately. No private connector tokens are passed to AI jobs.
+- Enable branch protection only after observing real successful and failing runs. Require PR checks on all PRs; a skipped fork/draft AI job is not AI approval. Do not use pull_request_target to run untrusted code with secrets.
+- Link remediation PRs to existing Linear issues in the PR description using contributing references (e.g. "Updates ISSUE-123"), then complete each issue only after its acceptance checks and audit record are verified. This repository does not configure the external Linear workspace's integration.
+- No workflow automatically approves or merges a PR. The Publish workflow intentionally retains its existing tag-triggered release behavior after successful gates. Do not create a release tag merely to test the workflow; use Release Review first.

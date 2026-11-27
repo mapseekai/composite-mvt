@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "block",
+        "partial"
+      ]
+    },
+    "candidate_sha": {
+      "type": "string"
+    },
+    "report": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "verdict",
+    "candidate_sha",
+    "report"
+  ],
+  "additionalProperties": false
+}

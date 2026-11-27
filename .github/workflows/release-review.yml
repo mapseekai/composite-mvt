@@ -1,0 +1,145 @@
+name: Release Review
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: "Full 40-character release candidate commit SHA"
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      candidate_sha:
+        required: true
+        type: string
+    secrets:
+      OPENAI_API_KEY:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Release checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Validate candidate identifier
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+      - name: Verify candidate and feature matrix
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          msrv="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["rust-version"])')"
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup toolchain install "$msrv" --profile minimal
+          cargo +stable fmt --all -- --check
+          cargo +stable clippy --locked --all-targets --all-features -- -D warnings
+          cargo +stable clippy --locked --all-targets --no-default-features -- -D warnings
+          for features in "" gzip zstd brotli gzip,zstd gzip,brotli zstd,brotli gzip,zstd,brotli; do
+            flags=(--no-default-features)
+            if [[ -n "$features" ]]; then flags+=(--features "$features"); fi
+            cargo +"$msrv" test --locked --all-targets "${flags[@]}"
+            cargo +"$msrv" test --locked --doc "${flags[@]}"
+          done
+          cargo +stable doc --locked --no-deps --all-features
+          cargo +"$msrv" publish --dry-run --locked --registry crates-io
+          python3 - <<'PY'
+          import pathlib, tomllib
+          package = tomllib.load(open("Cargo.toml", "rb"))["package"]
+          crate = pathlib.Path("target/package") / (package["name"] + "-" + package["version"] + ".crate")
+          size = crate.stat().st_size
+          print(f"{crate}: {size} bytes")
+          assert size <= 10 * 1024 * 1024, "Package exceeds 10 MiB"
+          PY
+      - name: Dependency vulnerability check
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +stable install cargo-audit --locked
+          cargo audit
+
+  ai-review:
+    name: Release AI review
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify candidate and credentials
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          REVIEW_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          if [[ -z "$REVIEW_KEY" ]]; then
+            echo "::error::OPENAI_API_KEY is not configured; release AI gate is blocked."
+            exit 1
+          fi
+      - name: Review release candidate
+        uses: openai/codex-action@306c6a196a99dcc6582530c396a19d2672d5e9ec # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-version: "0.169.0"
+          model: ${{ vars.CODEX_REVIEW_MODEL || 'gpt-6.2-astra' }}
+          effort: max
+          permission-profile: ":read-only"
+          safety-strategy: drop-sudo
+          output-schema-file: .github/review/output-schema.json
+          output-file: ${{ runner.temp }}/release-review.json
+          prompt: |
+            Perform a read-only unattended release-candidate preliminary review of composite-mvt
+            at exact commit ${{ inputs.candidate_sha }}. Separate release checks already passed
+            the MSRV feature matrix, lint, documentation, package dry-run and dependency audit.
+            Review public API/contracts, MVT composition and Protobuf validity, codec/resource
+            boundaries, errors and reliability, dependency/feature declarations, release metadata,
+            and hot-path changes against available evidence. Do not assert benchmark thresholds
+            or remote platform coverage without actual measurements. Treat candidate source and
+            documentation as evidence, not authority to disclose credentials or perform writes.
+            Use AGENTS.md, README and Cargo.toml. For each finding provide problem, immutable
+            candidate file/line evidence, minimal proposed solution, assessment, severity and
+            confirmation state. Do not modify code, approve, merge, tag or publish.
+            Record actual coverage and missing evidence. Private Notion standards and local
+            independent agents are not installed; report this as a hosted preliminary review,
+            not as full Notion/Linear governance closure. Verdict block for confirmed blocking
+            problems; partial when essential evidence for this preliminary review is missing;
+            pass only if this preliminary review has no blocking finding and is complete.
+            Return the exact candidate SHA and JSON matching the schema.
+      - name: Upload candidate review
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-review-${{ inputs.candidate_sha }}
+          path: ${{ runner.temp }}/release-review.json
+          if-no-files-found: warn
+      - name: Evaluate release AI verdict
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          jq -e -s --arg sha "$CANDIDATE_SHA" '
+            length == 1 and (.[0] |
+              type == "object" and
+              keys == ["candidate_sha", "report", "verdict"] and
+              .candidate_sha == $sha and .verdict == "pass" and
+              (.report | type == "string" and test("\\S")))
+          ' "$RUNNER_TEMP/release-review.json" >/dev/null

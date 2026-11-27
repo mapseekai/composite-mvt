@@ -5,24 +5,68 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  resolve-candidate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.candidate.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Resolve exact candidate commit
+        id: candidate
+        shell: bash
+        run: |
+          sha="$(git rev-parse HEAD)"
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+
+  release-review:
+    needs: resolve-candidate
+    uses: ./.github/workflows/release-review.yml
+    permissions:
+      contents: read
+    with:
+      candidate_sha: ${{ needs.resolve-candidate.outputs.sha }}
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
   publish:
+    needs: [resolve-candidate, release-review]
     name: Publish crate and create GitHub release
     runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
     steps:
-      - name: Check out the tagged source
+      - name: Check out the reviewed candidate
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-candidate.outputs.sha }}
+          persist-credentials: false
 
-      - name: Install Rust 1.87
-        run: rustup toolchain install 1.87.0 --profile minimal
+      - name: Install the reviewed package's MSRV
+        shell: bash
+        run: |
+          set -euo pipefail
+          msrv="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["rust-version"])')"
+          rustup toolchain install "$msrv" --profile minimal
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
 
       - name: Verify the tag matches the package version
         shell: bash
         run: |
-          metadata="$(cargo +1.87.0 metadata --no-deps --format-version=1)"
+          metadata="$(cargo +"$MSRV" metadata --no-deps --format-version=1)"
           crate_name="$(jq -r '.packages[0].name' <<<"$metadata")"
           package_version="$(jq -r '.packages[0].version' <<<"$metadata")"
 
@@ -35,11 +79,21 @@ jobs:
             echo "PACKAGE_VERSION=$package_version"
           } >> "$GITHUB_ENV"
 
-      - name: Test all targets and features
-        run: cargo +1.87.0 test --all-targets --all-features --locked
-
-      - name: Verify the publishable package
-        run: cargo +1.87.0 publish --dry-run --locked --registry crates-io
+      - name: Confirm the remote tag still identifies the reviewed commit
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ needs.resolve-candidate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          tag_sha="$(git ls-remote --exit-code --tags origin "$tag_ref" "${tag_ref}^{}" |
+            awk -v ref="$tag_ref" '
+              $2 == ref { tag = $1 }
+              $2 == (ref "^{}") { peeled = $1 }
+              END { print (peeled != "" ? peeled : tag) }
+            ')"
+          test "$tag_sha" = "$CANDIDATE_SHA"
 
       - name: Authenticate to crates.io with OIDC
         id: crates_io_auth
@@ -64,7 +118,7 @@ jobs:
           if [[ "$published" == true ]]; then
             echo "${CRATE_NAME} ${PACKAGE_VERSION} is already published; skipping upload."
           else
-            cargo +1.87.0 publish --locked --registry crates-io
+            cargo +"$MSRV" publish --locked --registry crates-io
           fi
 
       - name: Create the GitHub release
