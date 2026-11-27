@@ -9,6 +9,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Reject composite tiles that exceed the Protobuf message size limit before allocating the output.
+- Report the MVT sample reader's element memory limit as a resource error.
 - Include the source repository in the crate metadata.
 - Serve the bundled MapLibre GL JS license and show data attribution for the OpenFreeMap sources.
 - Update the MapLibre example's HTTP/2 and TLS dependencies to patched versions.

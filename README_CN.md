@@ -39,6 +39,10 @@ assert_eq!(composer.output_compression().content_encoding(), Some("gzip"));
 
 其余情况下，合成器要么原样返回合并后的原始 MVT，要么对**完整**合成结果应用一次固定的输出压缩。编码器使用默认参数，输出格式在构建时确定。非空压缩输入即使解码为零字节，仍按配置编码输出。
 
+无论输出是否压缩，完整瓦片的原始 Protobuf 长度都必须小于 2 GiB。[Protobuf 消息长度限制](https://protobuf.dev/programming-guides/encoding/#encoded-proto-size-limitations)
+
+使用 flate2 1.1.9 时，每个 gzip 输入成员的可选文件名和注释分别最多为 65,535 字节，不计末尾的 NUL。
+
 对于源元数据，`MvtSource::from_mvt` 与 `from_mvts` 只会自动识别 gzip 和 Zstandard 帧，其他样本按原始 MVT 处理。Brotli 样本须通过 `from_mvt_with_compression` 或 `from_mvts_with_compression` 显式指定 `Compression::Brotli`。样本构造方法会拒绝零字节输入。
 
 通过 HTTP 返回压缩字节时，应使用 `composer.output_compression().content_encoding()` 设置响应头。所有输入均为零字节、结果为空时，省略 `Content-Encoding`。
@@ -71,6 +75,8 @@ Gzip 输出是包裹完整合成 MVT 的单个 gzip member。此 crate 只创建
 请声明每个源可能输出的所有图层，并确保同一输入瓦片内的图层名唯一。每张瓦片可以只包含声明中的一部分图层。使用 `KeepFirst` 或 `KeepLast` 时，合成器仅对声明重叠的源读取图层名，并检查 Protobuf 字段边界，包括嵌套的要素和属性值。保留的字段按原顺序逐字节复制，包括未知字段。
 
 `build()` 会执行相同的重复图层校验，以及源 ID、图层和功能特性校验。样本构造与源解码返回 `SourceError`，配置返回 `BuildError`，请求合成返回 `ComposeError`。可用 `BuildError::duplicate_layer_name()` 查看重名图层及其两个来源，用 `ComposeError::source_id()` 找到解压或扫描失败的源。MVT 数据中的缺失或空图层名由 `SourceError::is_missing_layer_name()` 识别，显式配置的空名称由 `BuildError::is_empty_layer_name()` 识别。三种错误均可通过 `backtrace()` 查看回溯，并通过 `std::error::Error::source()` 查看已有的底层错误。合成返回完整结果或错误。
+
+样本读取超出元素内存预算时会返回资源超限错误。可以使用覆盖相同图层的较小样本，或显式声明数据源的全部图层。
 
 ## 并发与内存
 

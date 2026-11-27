@@ -81,7 +81,9 @@ impl LayerFilter {
             }
         }
 
-        let mut output = Vec::with_capacity(fields.iter().flatten().map(|field| field.len()).sum());
+        let output_len = fields.iter().flatten().map(|field| field.len()).sum();
+        ComposeError::check_output_len(output_len)?;
+        let mut output = Vec::with_capacity(output_len);
         for field in fields.into_iter().flatten() {
             output.extend_from_slice(field);
         }

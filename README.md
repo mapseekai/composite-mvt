@@ -53,6 +53,12 @@ are not part of the public API: enabled codecs use their default parameters, and
 cannot be overridden per request. A nonempty compressed input that decodes to zero bytes still
 follows the normal output encoding path.
 
+The complete uncompressed result must be smaller than 2 GiB, even when compressed output is
+requested. See the [Protobuf message size limit](https://protobuf.dev/programming-guides/encoding/#encoded-proto-size-limitations).
+
+With flate2 1.1.9, the optional file name and comment in each gzip input member are each limited to
+65,535 bytes, excluding their terminating NUL bytes.
+
 For source metadata, `MvtSource::from_mvt` and `from_mvts` auto-detect only gzip and Zstandard
 frames; other samples are treated as raw MVT. Use `from_mvt_with_compression` or
 `from_mvts_with_compression` with `Compression::Brotli` for Brotli samples. Sample constructors
@@ -110,6 +116,9 @@ scanning. Use `SourceError::is_missing_layer_name()` for omitted or empty names 
 `BuildError::is_empty_layer_name()` for empty names in the configuration. Each error exposes a
 `backtrace()` and any underlying failures through `std::error::Error::source()`.
 Composition returns a complete result or an error.
+
+Exceeding the sample reader's element memory limit produces a resource error. Use a smaller
+representative sample that covers the same layers or declare all source layers explicitly.
 
 ## Concurrency and memory
 

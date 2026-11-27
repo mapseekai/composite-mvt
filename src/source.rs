@@ -56,6 +56,9 @@ pub enum Compression {
     /// Raw, uncompressed bytes.
     None,
     /// RFC 1952 gzip bytes, enabled by the `gzip` feature.
+    ///
+    /// With `flate2` 1.1.9, each input member's optional file name and comment fields are
+    /// limited to 65,535 bytes each, excluding their terminating NUL bytes.
     Gzip,
     /// Zstandard bytes, enabled by the `zstd` feature.
     Zstd,
@@ -148,8 +151,7 @@ impl MvtSource {
     ///
     /// # Errors
     ///
-    /// Returns a [`SourceError`] for empty input, disabled or invalid compression, or invalid MVT
-    /// data.
+    /// Returns the same errors as [`Self::from_mvt_with_compression`].
     pub fn from_mvt(id: impl Into<SourceId>, bytes: &[u8]) -> Result<Self, SourceError> {
         Self::from_mvt_with_compression(id, bytes, compression::detect_compression(bytes))
     }
@@ -157,10 +159,13 @@ impl MvtSource {
     /// Reads source metadata from one sample using an explicitly declared compression format.
     ///
     /// Use this constructor for Brotli and whenever the input encoding is known externally.
+    /// If a sample exceeds the MVT reader's element memory limit, use a smaller sample that
+    /// covers the same layers or declare all source layers with [`Self::with_layers`].
     ///
     /// # Errors
     ///
-    /// Returns a [`SourceError`] when the sample cannot be decoded or is not a usable MVT.
+    /// Returns a [`SourceError`] when the sample cannot be decoded, is not a usable MVT, or
+    /// exceeds the reader's element memory limit.
     pub fn from_mvt_with_compression(
         id: impl Into<SourceId>,
         bytes: &[u8],
@@ -186,7 +191,8 @@ impl MvtSource {
     ///
     /// # Errors
     ///
-    /// Returns a [`SourceError`] for no samples, inconsistent detected encodings, or invalid input.
+    /// Returns a [`SourceError`] for no samples, inconsistent detected encodings, or any sample
+    /// rejected by [`Self::from_mvts_with_compression`].
     pub fn from_mvts<I, B>(id: impl Into<SourceId>, inputs: I) -> Result<Self, SourceError>
     where
         I: IntoIterator<Item = B>,
@@ -212,10 +218,12 @@ impl MvtSource {
     ///
     /// Collects layer names in first-seen order across samples. Additional occurrences of a name
     /// within a single sample are retained so the composer builder can reject the duplicate.
+    /// Each sample has the same parsing limits as [`Self::from_mvt_with_compression`].
     ///
     /// # Errors
     ///
-    /// Returns a [`SourceError`] when any sample is empty, cannot be decoded, or is invalid MVT.
+    /// Returns a [`SourceError`] if no samples are supplied or a sample is rejected by the
+    /// same rules as [`Self::from_mvt_with_compression`].
     pub fn from_mvts_with_compression<I, B>(
         id: impl Into<SourceId>,
         inputs: I,
@@ -289,10 +297,7 @@ impl MvtSource {
 }
 
 fn read_layers(bytes: &[u8]) -> Result<Box<[LayerName]>, SourceError> {
-    let reader = MvtReaderRef::new(bytes).map_err(|error| match error {
-        MvtError::MissingLayerName => SourceErrorKind::MissingLayerName.into(),
-        error => SourceError::invalid_mvt(error),
-    })?;
+    let reader = MvtReaderRef::new(bytes).map_err(sample_parse_error)?;
     let layers: Box<[LayerName]> = reader.layers().map(|layer| layer.name().into()).collect();
 
     if layers.is_empty() {
@@ -302,9 +307,46 @@ fn read_layers(bytes: &[u8]) -> Result<Box<[LayerName]>, SourceError> {
     Ok(layers)
 }
 
+fn sample_parse_error(error: MvtError) -> SourceError {
+    match error {
+        MvtError::MissingLayerName => SourceErrorKind::MissingLayerName.into(),
+        error @ MvtError::Decode(buffa::DecodeError::ElementMemoryLimitExceeded) => {
+            SourceErrorKind::SampleElementMemoryLimit {
+                cause: Box::new(error),
+            }
+            .into()
+        }
+        error => SourceError::invalid_mvt(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error as _;
+
+    #[test]
+    fn sample_element_limit_is_reported_separately_from_invalid_mvt() {
+        let error = sample_parse_error(MvtError::Decode(
+            buffa::DecodeError::ElementMemoryLimitExceeded,
+        ));
+
+        assert!(!error.is_invalid_mvt());
+        assert!(
+            error
+                .to_string()
+                .starts_with("MVT sample exceeds the parser's element memory limit")
+        );
+        let cause = error
+            .source()
+            .and_then(|cause| cause.downcast_ref::<MvtError>());
+        assert!(matches!(
+            cause,
+            Some(MvtError::Decode(
+                buffa::DecodeError::ElementMemoryLimitExceeded
+            ))
+        ));
+    }
 
     #[test]
     fn strong_names_convert_from_strings_and_display() {

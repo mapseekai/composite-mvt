@@ -44,7 +44,8 @@ impl MvtComposer {
     /// `inputs[n]` is decoded according to `self.sources()[n].compression()`. A zero-byte input
     /// contributes an empty tile regardless of the encoding. When every input is zero bytes,
     /// this method returns empty bytes without allocating or using codecs. Otherwise the
-    /// composite is returned raw or encoded once using [`Self::output_compression`].
+    /// composite is returned raw or encoded once using [`Self::output_compression`]. Its
+    /// uncompressed length must be below the 2 GiB Protobuf message limit.
     ///
     /// With [`crate::DuplicateLayer::KeepFirst`] or [`crate::DuplicateLayer::KeepLast`], only
     /// sources with overlapping declarations are scanned. Every valid tile must use unique
@@ -58,7 +59,7 @@ impl MvtComposer {
     /// # Errors
     ///
     /// Returns [`ComposeError`] for an input count mismatch, a failure to decode or scan an input,
-    /// an exceeded decoded size limit, or an output encoding failure. Use
+    /// an exceeded input or output size limit, or an output encoding failure. Use
     /// [`ComposeError::source_id`] to identify a source that failed decoding or scanning.
     pub fn compose<B>(&self, inputs: &[B]) -> Result<Bytes, ComposeError>
     where
@@ -144,7 +145,9 @@ impl MvtComposer {
         let output = if let Some(filter) = &self.layer_filter {
             filter.compose(&self.sources, raw_inputs)?
         } else {
-            let mut output = Vec::with_capacity(self.max_decoded_bytes - remaining);
+            let output_len = self.max_decoded_bytes - remaining;
+            ComposeError::check_output_len(output_len)?;
+            let mut output = Vec::with_capacity(output_len);
             for (_, input) in raw_inputs {
                 output.extend_from_slice(input);
             }

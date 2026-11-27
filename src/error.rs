@@ -67,7 +67,7 @@ impl SourceError {
         }
     }
 
-    /// Returns whether the decoded bytes failed MVT parsing.
+    /// Returns whether the MVT parser rejected the decoded bytes as invalid.
     #[must_use]
     pub const fn is_invalid_mvt(&self) -> bool {
         matches!(self.kind, SourceErrorKind::InvalidMvt { .. })
@@ -128,7 +128,8 @@ impl Error for SourceError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match &self.kind {
             SourceErrorKind::DecompressionFailed { cause, .. }
-            | SourceErrorKind::InvalidMvt { cause } => Some(cause.as_ref()),
+            | SourceErrorKind::InvalidMvt { cause }
+            | SourceErrorKind::SampleElementMemoryLimit { cause } => Some(cause.as_ref()),
             _ => None,
         }
     }
@@ -152,6 +153,8 @@ pub(crate) enum SourceErrorKind {
     },
     #[error("input is not a valid MVT")]
     InvalidMvt { cause: BoxError },
+    #[error("MVT sample exceeds the parser's element memory limit")]
+    SampleElementMemoryLimit { cause: BoxError },
     #[error("MVT layer name is missing or empty")]
     MissingLayerName,
     #[error("MVT contains no layers")]
@@ -384,6 +387,13 @@ impl ComposeError {
         matches!(self.kind, ComposeErrorKind::SizeOverflow)
     }
 
+    pub(crate) fn check_output_len(len: usize) -> Result<(), Self> {
+        if len > buffa::MAX_MESSAGE_BYTES as usize {
+            return Err(ComposeErrorKind::OutputTooLarge { len }.into());
+        }
+        Ok(())
+    }
+
     /// Returns the backtrace captured when the error was created.
     pub const fn backtrace(&self) -> &Backtrace {
         &self.backtrace
@@ -437,6 +447,11 @@ pub(crate) enum ComposeErrorKind {
     },
     #[error("decoded composite MVT exceeds the size limit")]
     SizeOverflow,
+    #[error(
+        "composite MVT of {len} bytes exceeds the Protobuf message limit of {} bytes",
+        buffa::MAX_MESSAGE_BYTES
+    )]
+    OutputTooLarge { len: usize },
 }
 
 fn fmt_error(
@@ -456,4 +471,19 @@ fn fmt_error(
         write!(f, "{separator}{cause}")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn composite_length_respects_the_protobuf_message_limit() {
+        let limit = 2_147_483_647;
+        assert!(ComposeError::check_output_len(limit).is_ok());
+
+        let error = ComposeError::check_output_len(limit + 1).unwrap_err();
+        assert!(matches!(error.kind, ComposeErrorKind::OutputTooLarge { len } if len == limit + 1));
+        assert!(!error.is_size_overflow());
+    }
 }
