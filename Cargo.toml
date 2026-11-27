@@ -6,6 +6,7 @@ rust-version = "1.87"
 description = "Compose fixed Mapbox Vector Tile sources with optional input and output compression"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
+repository = "https://github.com/mapseekai/composite-mvt"
 documentation = "https://docs.rs/composite-mvt"
 keywords = ["mvt", "mapbox", "vector-tile", "tiles", "geospatial"]
 categories = ["compression", "data-structures", "encoding"]

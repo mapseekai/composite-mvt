@@ -12,6 +12,7 @@ use crate::state::AppState;
 const HTML: &[u8] = include_bytes!("../maplibre/index.html");
 const MAPLIBRE_JS: &[u8] = include_bytes!("../maplibre/maplibre-gl.js");
 const MAPLIBRE_CSS: &[u8] = include_bytes!("../maplibre/styles/maplibre-gl.css");
+const MAPLIBRE_LICENSE: &[u8] = include_bytes!("../maplibre/LICENSE-maplibre-gl.txt");
 
 pub(crate) fn router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -48,6 +49,11 @@ async fn dispatch(
             "application/javascript; charset=utf-8",
         ),
         "/maplibre-gl.css" => response(StatusCode::OK, MAPLIBRE_CSS, "text/css; charset=utf-8"),
+        "/maplibre-gl-license.txt" => response(
+            StatusCode::OK,
+            MAPLIBRE_LICENSE,
+            "text/plain; charset=utf-8",
+        ),
         "/health" => text_response(StatusCode::OK, "ok\n"),
         _ => {
             if let Some(bytes) = crate::state::fixture(path) {

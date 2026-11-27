@@ -16,3 +16,9 @@ Their layer names and readability are checked by the `maplibre_server` example t
 performance tests. The bundled frontend includes 3×3 Europe tile sets at z=2, z=3, z=4, and z=5,
 so it works without outbound network access while zooming across those four levels. The demo tiles
 retain `geolines`, `centroids`, and `countries`; the OpenFreeMap z=4 tiles include `landuse`.
+
+The `open/` tiles come from the OpenFreeMap planet tile service. Credit © OpenMapTiles and
+© OpenStreetMap contributors when redistributing these tiles. The OpenStreetMap data is available
+under the Open Database License 1.0. [OpenFreeMap source](https://tiles.openfreemap.org/planet/latest)
+· [OpenMapTiles](https://www.openmaptiles.org/) · [OpenStreetMap copyright](https://www.openstreetmap.org/copyright)
+· [ODbL 1.0](https://opendatacommons.org/licenses/odbl/1-0/)

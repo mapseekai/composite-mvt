@@ -37,6 +37,7 @@
       <button class="primary" type="submit" form="sources">应用并显示</button>
     </div>
     <div id="status" role="status"></div>
+    <p><a href="/maplibre-gl-license.txt">MapLibre GL JS 许可证</a></p>
   </aside>
   <div id="map"></div>
   <script src="/maplibre-gl.js"></script>
@@ -44,13 +45,18 @@
     const form = document.querySelector('#sources');
     const status = document.querySelector('#status');
     const presetToggle = document.querySelector('#preset-toggle');
+    const LOCAL_OPENFREEMAP_URL = '/fixtures/open/{z}/{x}/{y}.pbf';
+    const ONLINE_OPENFREEMAP_URL = 'https://tiles.openfreemap.org/planet/latest/{z}/{x}/{y}.pbf';
+    const OPENFREEMAP_ATTRIBUTION =
+      '<a href="https://www.openmaptiles.org/">© OpenMapTiles</a> · ' +
+      '<a href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a>';
     const LOCAL_SOURCES = [
       { url: '/fixtures/demo/{z}/{x}/{y}.pbf', layers: 'geolines,centroids,countries', color: '#607d9d', minzoom: 2, maxzoom: 6 },
-      { url: '/fixtures/open/{z}/{x}/{y}.pbf', layers: 'landuse', color: '#d8bd8a', minzoom: 2, maxzoom: 6 }
+      { url: LOCAL_OPENFREEMAP_URL, layers: 'landuse', color: '#d8bd8a', minzoom: 2, maxzoom: 6 }
     ];
     const ONLINE_SOURCES = [
       { url: 'https://demotiles.maplibre.org/tiles/{z}/{x}/{y}.pbf', layers: 'geolines,centroids,countries', color: '#607d9d', minzoom: 0, maxzoom: 14 },
-      { url: 'https://tiles.openfreemap.org/planet/latest/{z}/{x}/{y}.pbf', layers: 'landuse', color: '#d8bd8a', minzoom: 0, maxzoom: 14 }
+      { url: ONLINE_OPENFREEMAP_URL, layers: 'landuse', color: '#d8bd8a', minzoom: 0, maxzoom: 14 }
     ];
     let map;
     let layerIds = [];
@@ -123,9 +129,12 @@
 
       layerIds.forEach((id) => map.getLayer(id) && map.removeLayer(id));
       if (map.getSource('composite')) map.removeSource('composite');
+      const usesOpenFreeMap = grouped.has(`${location.origin}${LOCAL_OPENFREEMAP_URL}`)
+        || grouped.has(ONLINE_OPENFREEMAP_URL);
       map.addSource('composite', {
         type: 'vector',
         tiles: [`${location.origin}/tiles/{z}/{x}/{y}.pbf`],
+        attribution: usesOpenFreeMap ? OPENFREEMAP_ATTRIBUTION : '',
         minzoom: Math.min(...sources.map((source) => source.minzoom)),
         maxzoom: Math.max(...sources.map((source) => source.maxzoom))
       });
